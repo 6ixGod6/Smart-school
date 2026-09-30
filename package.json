@@ -1,0 +1,18 @@
+{
+  "name": "smart-school",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Multi-tenant school-parent communication platform for K-12 schools in Liberia.",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm --filter @smart-school/api test",
+    "dev:api": "pnpm --filter @smart-school/api dev",
+    "db:generate": "pnpm --filter @smart-school/shared db:generate",
+    "db:migrate": "pnpm --filter @smart-school/shared db:migrate",
+    "db:studio": "pnpm --filter @smart-school/shared db:studio"
+  }
+}

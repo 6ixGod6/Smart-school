@@ -1,0 +1,24 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# pnpm 11 blocks lifecycle scripts until they are explicitly allowed here.
+# bcrypt and esbuild download prebuilt native binaries; prisma fetches its engines.
+allowBuilds:
+  bcrypt: true
+  esbuild: true
+  prisma: true
+  "@prisma/engines": true
+  "@prisma/client": true
+
+onlyBuiltDependencies:
+  - bcrypt
+  - esbuild
+  - prisma
+  - "@prisma/client"
+  - "@prisma/engines"
+
+minimumReleaseAgeExclude:
+  - "@vitest/mocker@5.0.3"
+  - "@vitest/spy@5.0.3"
+  - vitest@5.0.3

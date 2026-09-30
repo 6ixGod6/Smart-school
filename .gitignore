@@ -1,0 +1,41 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# secrets — never commit these (§2.4). .env.example is the only committed variant.
+.env
+.env.*
+!.env.example
+
+# build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# generated Prisma client output (§2.3)
+packages/shared/src/generated/
+**/generated/prisma/
+.prisma/
+
+# never needed here, but §2.3 asks for it
+.expo/
+
+# test / coverage artefacts
+coverage/
+.vitest/
+
+# logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json

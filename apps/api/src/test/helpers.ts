@@ -43,6 +43,7 @@ export type Harness = {
 
 const TABLES = [
   "refresh_tokens",
+  "parent_login_attempts",
   "audit_logs",
   "payment_charge_items",
   "receipts",

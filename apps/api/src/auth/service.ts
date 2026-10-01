@@ -27,6 +27,11 @@ type SessionUser = {
 
 export type AuthSuccess = TokenPair & { user: SessionUser };
 
+export function clientIpFrom(req: { ip?: string; socket?: { remoteAddress?: string } }): string {
+  const raw = req.ip || req.socket?.remoteAddress || "unknown";
+  return raw.trim() || "unknown";
+}
+
 function expiresAtFromDays(days: number): Date {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 }
@@ -90,39 +95,86 @@ async function failStaffLogin(
   throw unauthenticated(LOGIN_FAILED_MESSAGE);
 }
 
-async function failParentLogin(
+async function recordParentPhoneFailure(
   prisma: PrismaClient,
   config: AppConfig,
-  parentId: string | null,
-  schoolId: string | null,
-  currentAttempts: number,
+  phone: string,
+  ip: string,
+): Promise<void> {
+  const now = Date.now();
+  const existing = await prisma.parentLoginAttempt.findUnique({
+    where: { phone_ip: { phone, ip } },
+  });
+  const lockExpired = existing?.lockedUntil != null && existing.lockedUntil.getTime() <= now;
+  const attempts = !existing || lockExpired ? 1 : existing.failedCount + 1;
+  const locked = attempts >= config.parentPhoneIpMaxFailedAttempts;
+  const lockedUntil = locked ? new Date(now + config.parentPhoneIpLockoutMinutes * 60_000) : null;
+  await prisma.parentLoginAttempt.upsert({
+    where: { phone_ip: { phone, ip } },
+    create: {
+      phone,
+      ip,
+      failedCount: attempts,
+      lockedUntil,
+      windowStartedAt: new Date(),
+    },
+    update: {
+      failedCount: attempts,
+      lockedUntil,
+      ...(lockExpired || !existing ? { windowStartedAt: new Date() } : {}),
+    },
+  });
+}
+
+async function clearParentPhoneFailures(prisma: PrismaClient, phone: string, ip: string): Promise<void> {
+  await prisma.parentLoginAttempt.deleteMany({ where: { phone, ip } });
+}
+
+async function phoneIpIsLocked(prisma: PrismaClient, phone: string, ip: string): Promise<boolean> {
+  const row = await prisma.parentLoginAttempt.findUnique({
+    where: { phone_ip: { phone, ip } },
+  });
+  return Boolean(row?.lockedUntil && row.lockedUntil.getTime() > Date.now());
+}
+
+async function rejectParentLogin(
+  prisma: PrismaClient,
+  config: AppConfig,
+  phone: string,
+  ip: string,
+  account?: { parentId: string; schoolId: string; currentAttempts: number },
 ): Promise<never> {
-  if (parentId) {
-    const attempts = currentAttempts + 1;
+  await recordParentPhoneFailure(prisma, config, phone, ip);
+  if (account) {
+    const attempts = account.currentAttempts + 1;
     const locked = attempts >= config.maxFailedLoginAttempts;
     await prisma.parent.update({
-      where: { id: parentId },
+      where: { id: account.parentId },
       data: {
         failedLoginAttempts: attempts,
         lockedUntil: locked ? new Date(Date.now() + config.loginLockoutMinutes * 60_000) : null,
       },
     });
     await writeAudit(prisma, {
-      schoolId,
-      actorParentId: parentId,
+      schoolId: account.schoolId,
+      actorParentId: account.parentId,
       action: locked ? "PARENT_LOGIN_LOCKED" : "PARENT_LOGIN_FAILED",
       entityType: "parent",
-      entityId: parentId,
+      entityId: account.parentId,
       metadata: { attempts },
     });
   }
   throw unauthenticated(LOGIN_FAILED_MESSAGE);
 }
 
-function assertNotLocked(lockedUntil: Date | null): void {
+function staffAccountLocked(lockedUntil: Date | null): void {
   if (lockedUntil && lockedUntil.getTime() > Date.now()) {
     throw tooMany("LOCKED_OUT", "Too many failed attempts. Try again later.");
   }
+}
+
+function parentAccountLocked(lockedUntil: Date | null): boolean {
+  return Boolean(lockedUntil && lockedUntil.getTime() > Date.now());
 }
 
 export async function loginStaff(
@@ -143,7 +195,7 @@ export async function loginStaff(
     await dummyVerify(input.password, config.bcryptRounds);
     throw unauthenticated(LOGIN_FAILED_MESSAGE);
   }
-  assertNotLocked(staff.lockedUntil);
+  staffAccountLocked(staff.lockedUntil);
   const ok = await verifySecret(input.password, staff.passwordHash);
   if (!ok) {
     await failStaffLogin(prisma, config, staff.id, staff.failedLoginAttempts);
@@ -177,12 +229,20 @@ export async function loginParent(
   deps: AppDeps,
   input: { phone: string; pin: string; schoolId?: string },
   userAgent: string | undefined,
+  ip: string,
 ): Promise<AuthSuccess> {
   const { prisma, config } = deps;
   const phone = input.phone.trim();
-  if (!isSixDigitPin(input.pin)) {
+  const clientIp = ip.trim() || "unknown";
+
+  if (await phoneIpIsLocked(prisma, phone, clientIp)) {
     await dummyVerify(input.pin, config.bcryptRounds);
     throw unauthenticated(LOGIN_FAILED_MESSAGE);
+  }
+
+  if (!isSixDigitPin(input.pin)) {
+    await dummyVerify(input.pin, config.bcryptRounds);
+    await rejectParentLogin(prisma, config, phone, clientIp);
   }
 
   const matches = await prisma.parent.findMany({
@@ -191,26 +251,25 @@ export async function loginParent(
   });
   if (matches.length === 0) {
     await dummyVerify(input.pin, config.bcryptRounds);
-    throw unauthenticated(LOGIN_FAILED_MESSAGE);
+    await rejectParentLogin(prisma, config, phone, clientIp);
   }
 
   if (input.schoolId) {
     const parent = matches.find((row) => row.schoolId === input.schoolId);
-    if (!parent) {
-      await dummyVerify(input.pin, config.bcryptRounds);
-      throw unauthenticated(LOGIN_FAILED_MESSAGE);
+    if (parent) {
+      return completeParentLogin(prisma, config, parent, input.pin, userAgent, clientIp);
     }
-    return completeParentLogin(prisma, config, parent, input.pin, userAgent);
+    await dummyVerify(input.pin, config.bcryptRounds);
+    await rejectParentLogin(prisma, config, phone, clientIp);
   }
 
   if (matches.length === 1) {
-    return completeParentLogin(prisma, config, matches[0]!, input.pin, userAgent);
+    return completeParentLogin(prisma, config, matches[0]!, input.pin, userAgent, clientIp);
   }
 
   // Multi-school: prove the PIN first. Never 409 before a correct PIN.
-  // A typo must not increment lockout on every school this phone belongs to;
-  // we only count failures against a row once the caller has named that school
-  // (the schoolId branch above) or when the phone maps to a single account.
+  // Per-account counters stay off this path so one typo does not lock every
+  // school. Phone+IP still counts, so omitting schoolId is not free guessing.
   const pinMatches: typeof matches = [];
   for (const row of matches) {
     if (await verifySecret(input.pin, row.pinHash)) {
@@ -218,15 +277,16 @@ export async function loginParent(
     }
   }
   if (pinMatches.length === 0) {
-    throw unauthenticated(LOGIN_FAILED_MESSAGE);
+    await rejectParentLogin(prisma, config, phone, clientIp);
   }
 
-  const unlocked = pinMatches.filter((row) => !(row.lockedUntil && row.lockedUntil.getTime() > Date.now()));
+  const unlocked = pinMatches.filter((row) => !parentAccountLocked(row.lockedUntil));
   if (unlocked.length === 0) {
-    throw tooMany("LOCKED_OUT", "Too many failed attempts. Try again later.");
+    await recordParentPhoneFailure(prisma, config, phone, clientIp);
+    throw unauthenticated(LOGIN_FAILED_MESSAGE);
   }
   if (unlocked.length === 1) {
-    return completeParentLogin(prisma, config, unlocked[0]!, input.pin, userAgent, true);
+    return completeParentLogin(prisma, config, unlocked[0]!, input.pin, userAgent, clientIp, true);
   }
 
   throw conflict("SCHOOL_SELECTION_REQUIRED", "This phone is registered at more than one school.", {
@@ -248,17 +308,26 @@ async function completeParentLogin(
   },
   pin: string,
   userAgent: string | undefined,
+  ip: string,
   pinAlreadyVerified = false,
 ): Promise<AuthSuccess> {
-  assertNotLocked(parent.lockedUntil);
   const ok = pinAlreadyVerified ? true : await verifySecret(pin, parent.pinHash);
   if (!ok) {
-    await failParentLogin(prisma, config, parent.id, parent.schoolId, parent.failedLoginAttempts);
+    await rejectParentLogin(prisma, config, parent.phone, ip, {
+      parentId: parent.id,
+      schoolId: parent.schoolId,
+      currentAttempts: parent.failedLoginAttempts,
+    });
+  }
+  if (parentAccountLocked(parent.lockedUntil)) {
+    await recordParentPhoneFailure(prisma, config, parent.phone, ip);
+    throw unauthenticated(LOGIN_FAILED_MESSAGE);
   }
   await prisma.parent.update({
     where: { id: parent.id },
     data: { failedLoginAttempts: 0, lockedUntil: null },
   });
+  await clearParentPhoneFailures(prisma, parent.phone, ip);
   const user: SessionUser = {
     id: parent.id,
     role: "parent",

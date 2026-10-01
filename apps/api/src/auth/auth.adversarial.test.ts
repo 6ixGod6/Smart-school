@@ -14,6 +14,8 @@ import {
   expectStatus,
   type Harness,
 } from "../test/helpers.ts";
+import { createApp } from "../app.ts";
+import { hashSecret } from "./passwords.ts";
 
 describe("authentication and authorization", () => {
   let h: Harness;
@@ -258,13 +260,15 @@ describe("authentication and authorization", () => {
     const lockedWrong = await request(h.app)
       .post("/v1/auth/parent/login")
       .send({ phone: "+231770000002", pin: "000000" });
-    expectStatus(lockedWrong, 429, "parent lockout with wrong pin");
-    expect(lockedWrong.body.error.code).toBe("LOCKED_OUT");
+    expectStatus(lockedWrong, 401, "parent lockout with wrong pin");
+    expect(lockedWrong.body.error.code).toBe("UNAUTHENTICATED");
 
     const lockedRight = await request(h.app)
       .post("/v1/auth/parent/login")
       .send({ phone: "+231770000002", pin: "135790" });
-    expectStatus(lockedRight, 429, "parent lockout even with correct pin");
+    expectStatus(lockedRight, 401, "locked account with correct pin is generic 401");
+    expect(lockedRight.body.error.code).toBe("UNAUTHENTICATED");
+    expect(lockedRight.body.error.code).not.toBe("LOCKED_OUT");
   });
 
   it("returns the generic 401 for a wrong PIN on a multi-school phone", async () => {
@@ -321,7 +325,8 @@ describe("authentication and authorization", () => {
     const lockedA = await request(h.app)
       .post("/v1/auth/parent/login")
       .send({ phone: "+231770000099", pin: PIN_SHARED, schoolId: h.ids.schoolA });
-    expectStatus(lockedA, 429, "school A parent locked");
+    expectStatus(lockedA, 401, "school A parent locked");
+    expect(lockedA.body.error.code).toBe("UNAUTHENTICATED");
 
     const schoolBOk = await request(h.app)
       .post("/v1/auth/parent/login")
@@ -361,5 +366,77 @@ describe("authentication and authorization", () => {
       .set(bearer(teacherToken))
       .send({ currentPin: PIN_A, newPin: "111111" });
     expectStatus(res, 403, "teacher changing parent pin");
+  });
+
+  it("locks a multi-school phone without schoolId after enough wrong PINs, without locking either account", async () => {
+    const pinHash = await hashSecret(PIN_SHARED, h.config.bcryptRounds);
+    const phone = "+231770000066";
+    const a = await h.prisma.parent.create({
+      data: { schoolId: h.ids.schoolA, phone, pinHash, mustChangePin: false },
+    });
+    const b = await h.prisma.parent.create({
+      data: { schoolId: h.ids.schoolB, phone, pinHash, mustChangePin: false },
+    });
+    const max = h.config.parentPhoneIpMaxFailedAttempts;
+    for (let i = 0; i < max; i += 1) {
+      const failed = await request(h.app)
+        .post("/v1/auth/parent/login")
+        .send({ phone, pin: "000000" });
+      expectStatus(failed, 401, `multi-school phone-ip attempt ${i + 1}`);
+    }
+    const blocked = await request(h.app).post("/v1/auth/parent/login").send({ phone, pin: PIN_SHARED });
+    expectStatus(blocked, 401, "phone-ip lockout with correct pin");
+    expect(blocked.body.error.code).toBe("UNAUTHENTICATED");
+
+    const [afterA, afterB] = await Promise.all([
+      h.prisma.parent.findUnique({ where: { id: a.id } }),
+      h.prisma.parent.findUnique({ where: { id: b.id } }),
+    ]);
+    expect(afterA?.failedLoginAttempts).toBe(0);
+    expect(afterB?.failedLoginAttempts).toBe(0);
+    expect(afterA?.lockedUntil).toBeNull();
+    expect(afterB?.lockedUntil).toBeNull();
+  });
+
+  it("increments the phone-level counter on a single-school wrong PIN", async () => {
+    const pinHash = await hashSecret(PIN_A, h.config.bcryptRounds);
+    const phone = "+231770000077";
+    await h.prisma.parent.create({
+      data: { schoolId: h.ids.schoolA, phone, pinHash, mustChangePin: false },
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const failed = await request(h.app)
+        .post("/v1/auth/parent/login")
+        .send({ phone, pin: "000000" });
+      expectStatus(failed, 401, `single-school phone-ip attempt ${i + 1}`);
+    }
+    const parent = await h.prisma.parent.findFirst({ where: { phone, schoolId: h.ids.schoolA } });
+    expect(parent?.failedLoginAttempts).toBe(3);
+    const phoneIp = await h.prisma.parentLoginAttempt.findFirst({ where: { phone } });
+    expect(phoneIp?.failedCount).toBe(3);
+  });
+
+  it("rejects a burst of login attempts from one IP", async () => {
+    const limited = createApp({
+      prisma: h.prisma,
+      config: {
+        ...h.config,
+        rateLimitEnabled: true,
+        authRateLimitMax: 5,
+        authRateLimitWindowMs: 60_000,
+        apiRateLimitMax: 1000,
+      },
+    });
+    for (let i = 0; i < 5; i += 1) {
+      const res = await request(limited)
+        .post("/v1/auth/staff/login")
+        .send({ email: "burst@school.test", password: "wrong-password" });
+      expectStatus(res, 401, `burst attempt ${i + 1}`);
+    }
+    const blocked = await request(limited)
+      .post("/v1/auth/staff/login")
+      .send({ email: "burst@school.test", password: "wrong-password" });
+    expectStatus(blocked, 429, "ip limiter burst");
+    expect(blocked.body.error.code).toBe("RATE_LIMITED");
   });
 });

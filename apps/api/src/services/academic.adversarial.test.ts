@@ -30,6 +30,8 @@ describe("periods, attendance, and school settings", () => {
   let parentAToken: string;
   let closedMark: string;
   let openMark: string;
+  let gapMark: string;
+  let cleanMark: string;
 
   beforeAll(async () => {
     h = await createHarness();
@@ -60,6 +62,8 @@ describe("periods, attendance, and school settings", () => {
     const today = utcToday();
     closedMark = addUtcDays(today, -45);
     openMark = addUtcDays(today, 0);
+    gapMark = addUtcDays(today, -20);
+    cleanMark = addUtcDays(today, 1);
 
     const closed = await request(h.app)
       .post(`/v1/schools/${h.ids.schoolA}/periods`)
@@ -176,16 +180,34 @@ describe("periods, attendance, and school settings", () => {
   });
 
   it("lets an admin amend a closed period with a reason and writes an audit row", async () => {
-    const res = await request(h.app)
+    const created = await request(h.app)
       .post(`/v1/schools/${h.ids.schoolA}/sections/${h.ids.sectionAssigned}/attendance`)
       .set(bearer(adminAToken))
       .send({
         date: closedMark,
         records: [{ studentId: h.ids.studentAssigned, status: "ABSENT" }],
+        reason: "Backfilling a missing day.",
+      });
+    expectStatus(created, 200, "admin closed period create");
+    const createAudits = await h.prisma.auditLog.count({
+      where: {
+        action: "ATTENDANCE_CLOSED_PERIOD_AMENDED",
+        schoolId: h.ids.schoolA,
+        entityId: created.body.records[0].id,
+      },
+    });
+    expect(createAudits).toBe(0);
+
+    const res = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/sections/${h.ids.sectionAssigned}/attendance`)
+      .set(bearer(adminAToken))
+      .send({
+        date: closedMark,
+        records: [{ studentId: h.ids.studentAssigned, status: "LATE" }],
         reason: "Correcting a late slip from the office.",
       });
     expectStatus(res, 200, "admin closed period with reason");
-    expect(res.body.records[0].status).toBe("ABSENT");
+    expect(res.body.records[0].status).toBe("LATE");
 
     const audit = await h.prisma.auditLog.findFirst({
       where: { action: "ATTENDANCE_CLOSED_PERIOD_AMENDED", schoolId: h.ids.schoolA },
@@ -200,7 +222,8 @@ describe("periods, attendance, and school settings", () => {
       reason: string;
     };
     expect(metadata.studentId).toBe(h.ids.studentAssigned);
-    expect(metadata.newStatus).toBe("ABSENT");
+    expect(metadata.oldStatus).toBe("ABSENT");
+    expect(metadata.newStatus).toBe("LATE");
     expect(metadata.reason).toContain("Correcting");
   });
 
@@ -273,5 +296,69 @@ describe("periods, attendance, and school settings", () => {
       .get(`/v1/schools/${h.ids.schoolA}/settings`)
       .set(bearer(adminBToken));
     expectStatus(res, 403, "cross-school settings");
+  });
+
+  it("rejects attendance on a date that no period covers", async () => {
+    const res = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/sections/${h.ids.sectionAssigned}/attendance`)
+      .set(bearer(teacherToken))
+      .send({
+        date: gapMark,
+        records: [{ studentId: h.ids.studentAssigned, status: "PRESENT" }],
+      });
+    expectStatus(res, 400, "date outside any period");
+    expect(res.body.error.message).toMatch(/no academic period covers this date/i);
+  });
+
+  it("writes no rows when a section mark fails partway through the list", async () => {
+    const before = await h.prisma.attendanceRecord.count({
+      where: { schoolId: h.ids.schoolA, date: new Date(`${cleanMark}T00:00:00.000Z`) },
+    });
+    const res = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/sections/${h.ids.sectionAssigned}/attendance`)
+      .set(bearer(teacherToken))
+      .send({
+        date: cleanMark,
+        records: [
+          { studentId: h.ids.studentAssigned, status: "PRESENT" },
+          { studentId: h.ids.studentOtherSection, status: "ABSENT" },
+        ],
+      });
+    expectStatus(res, 403, "mixed section mark");
+    const after = await h.prisma.attendanceRecord.count({
+      where: { schoolId: h.ids.schoolA, date: new Date(`${cleanMark}T00:00:00.000Z`) },
+    });
+    expect(after).toBe(before);
+  });
+
+  it("audits an edit of an existing record in an open period", async () => {
+    const first = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/sections/${h.ids.sectionAssigned}/attendance`)
+      .set(bearer(teacherToken))
+      .send({
+        date: cleanMark,
+        records: [{ studentId: h.ids.studentAssigned, status: "PRESENT" }],
+      });
+    expectStatus(first, 200, "open period first mark");
+
+    const edited = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/sections/${h.ids.sectionAssigned}/attendance`)
+      .set(bearer(teacherToken))
+      .send({
+        date: cleanMark,
+        records: [{ studentId: h.ids.studentAssigned, status: "LATE" }],
+      });
+    expectStatus(edited, 200, "open period edit");
+    expect(edited.body.records[0].status).toBe("LATE");
+
+    const audit = await h.prisma.auditLog.findFirst({
+      where: { action: "ATTENDANCE_AMENDED", schoolId: h.ids.schoolA },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(audit).toBeTruthy();
+    const metadata = audit?.metadata as { oldStatus: string; newStatus: string; studentId: string };
+    expect(metadata.studentId).toBe(h.ids.studentAssigned);
+    expect(metadata.oldStatus).toBe("PRESENT");
+    expect(metadata.newStatus).toBe("LATE");
   });
 });

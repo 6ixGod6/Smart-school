@@ -10,7 +10,10 @@ export type AuditInput = {
   metadata?: Record<string, unknown>;
 };
 
-export async function writeAudit(prisma: PrismaClient, input: AuditInput): Promise<void> {
+export async function writeAudit(
+  prisma: { auditLog: { create: PrismaClient["auditLog"]["create"] } },
+  input: AuditInput,
+): Promise<void> {
   await prisma.auditLog.create({
     data: {
       schoolId: input.schoolId ?? null,

@@ -4,6 +4,64 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-01 — Step 2 review: auth hardening and attendance correctness
+
+### What changed and why
+
+Fixes only. No admin UI. Period model unchanged.
+
+**A1. Multi-school PIN guessing is no longer free.** Every failed parent login increments a `parent_login_attempts` row keyed on phone + client IP, including unknown phones and single-school numbers. Per-account counters still apply only on the resolved path (named `schoolId` or a single match), so one typo does not lock the parent at both schools. After 20 failures from that IP (8 in tests) the pair is locked; the response is the same generic 401 as a wrong PIN.
+
+**A2. `express-rate-limit` is actually on the wire.** Strict limiter on `/v1/auth/staff/login`, `/v1/auth/parent/login`, and `/v1/auth/refresh` (default 40 / 15 min per IP — enough for a PTA wifi burst, not enough to lock dozens of parent accounts). Looser limiter on all of `/v1` (default 600 / 15 min). Both window and max are env-configurable. Tests skip these unless a test builds an app with `rateLimitEnabled: true`. Production sets `trust proxy` so Railway’s forwarded IP is the key.
+
+**A3. A locked parent with the correct PIN is a generic 401**, not `LOCKED_OUT`. That code confirmed the PIN was right.
+
+**B1.** Attendance for a date no period covers is 400: “No academic period covers this date — create or extend the period first.”
+
+**B2.** Marking runs in `prisma.$transaction`. Existing rows for that section and date are loaded in one query. A student who is not in the section fails the whole request with no rows written.
+
+**B3.** Editing an existing record always writes an audit row: `ATTENDANCE_AMENDED` while the period is open, `ATTENDANCE_CLOSED_PERIOD_AMENDED` when it is closed. Creating a new record does not.
+
+### Dependencies added
+
+None. `express-rate-limit@8.7.0` was already in `package.json`; it is now mounted.
+
+### High-risk: authentication
+
+- Parent PIN brute force from one IP is capped by phone+IP even when `schoolId` is omitted. Rotating IPs still hits the auth IP limiter (40 / 15 min).
+- Phone-level lockout never returns a distinct code. Locked account + correct PIN is the same 401 as a wrong PIN.
+- Per-account lockout still exists on the resolved path. Combined with the IP limiter, one address can lock at most a handful of parent accounts per window (40 ÷ 5), which is the PTA-vs-DoS tradeoff.
+- `trust proxy` is production-only so tests and local HTTP do not trust `X-Forwarded-For`.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  4 passed (4)
+      Tests  45 passed (45)
+   Start at  11:16:06
+   Duration  9.63s
+```
+
+`pnpm --filter @smart-school/api typecheck` (`tsc --noEmit`) also passed.
+
+Adversarial coverage added this step:
+
+- Repeated wrong PINs on a multi-school phone without `schoolId` lock that phone+IP; neither school’s account counter moves.
+- Repeated wrong PINs on a single-school phone increment both the account counter and the phone+IP counter.
+- IP limiter rejects a burst of login attempts (429 `RATE_LIMITED`).
+- Locked account + correct PIN → 401 `UNAUTHENTICATED`, not `LOCKED_OUT`.
+- Attendance on a date in no period → 400.
+- Mixed in-section + out-of-section mark → 403 and no rows for that date.
+- Open-period edit of an existing record writes `ATTENDANCE_AMENDED`.
+
+Failures: none in this run.
+
+---
+
 ## 2026-10-01 — Review rework A1–A3 + step 2 backend (periods, attendance, settings)
 
 ### What changed and why

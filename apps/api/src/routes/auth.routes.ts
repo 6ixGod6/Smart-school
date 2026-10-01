@@ -1,7 +1,6 @@
 import { Router } from "express";
-import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
-import { loginParent, loginStaff, logout, refreshSession, setParentPin } from "../auth/service.ts";
+import { loginParent, loginStaff, logout, refreshSession, setParentPin, clientIpFrom } from "../auth/service.ts";
 import {
   clearRefreshCookie,
   publicSession,
@@ -12,6 +11,7 @@ import {
 import type { AppDeps } from "../auth/principal.ts";
 import { asyncHandler, unauthenticated } from "../http.ts";
 import { requireAuth } from "../middleware/auth.ts";
+import { authRateLimiter } from "../middleware/rateLimit.ts";
 
 const staffLoginSchema = z
   .object({
@@ -40,18 +40,11 @@ function cookieSecure(deps: AppDeps): boolean {
 
 export function authRouter(deps: AppDeps): Router {
   const router = Router();
-  const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 30,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: () => !deps.config.rateLimitEnabled,
-    message: { error: { code: "RATE_LIMITED", message: "Too many login attempts from this address." } },
-  });
+  const authLimiter = authRateLimiter(deps);
 
   router.post(
     "/staff/login",
-    loginLimiter,
+    authLimiter,
     asyncHandler(async (req, res) => {
       const body = staffLoginSchema.parse(req.body);
       const result = await loginStaff(deps, body, req.get("user-agent") ?? undefined);
@@ -62,10 +55,10 @@ export function authRouter(deps: AppDeps): Router {
 
   router.post(
     "/parent/login",
-    loginLimiter,
+    authLimiter,
     asyncHandler(async (req, res) => {
       const body = parentLoginSchema.parse(req.body);
-      const result = await loginParent(deps, body, req.get("user-agent") ?? undefined);
+      const result = await loginParent(deps, body, req.get("user-agent") ?? undefined, clientIpFrom(req));
       setRefreshCookie(res, result.refreshToken, refreshCookieMaxAgeMs(result.user.kind, deps.config), cookieSecure(deps));
       res.json(publicSession(result));
     }),
@@ -73,6 +66,7 @@ export function authRouter(deps: AppDeps): Router {
 
   router.post(
     "/refresh",
+    authLimiter,
     asyncHandler(async (req, res) => {
       const token = readRefreshCookie(req);
       if (!token) throw unauthenticated("Invalid refresh token.");

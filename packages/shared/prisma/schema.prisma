@@ -286,6 +286,22 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+/// Phone + IP throttle for parent login. Not an account row: a typo at a
+/// multi-school number must not lock every school, but guessing must not be free.
+model ParentLoginAttempt {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  phone           String
+  ip              String
+  failedCount     Int       @default(0) @map("failed_count")
+  lockedUntil     DateTime? @map("locked_until") @db.Timestamptz
+  windowStartedAt DateTime  @default(now()) @map("window_started_at") @db.Timestamptz
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([phone, ip])
+  @@index([phone])
+  @@map("parent_login_attempts")
+}
+
 // ---------------------------------------------------------------------------
 // Core hierarchy — School → GradeLevel → Section → Student
 // ---------------------------------------------------------------------------

@@ -38,7 +38,10 @@ export async function markSectionAttendance(
 
   const date = parseDateOnly(input.date);
   const covering = await periodCoveringDate(prisma, schoolId, date);
-  const closed = covering ? periodIsClosed(covering.endDate) : false;
+  if (!covering) {
+    throw badRequest("No academic period covers this date — create or extend the period first.");
+  }
+  const closed = periodIsClosed(covering.endDate);
   const reason = input.reason?.trim() ?? "";
 
   if (closed && auth.role === "teacher") {
@@ -52,71 +55,72 @@ export async function markSectionAttendance(
     throw badRequest("records must be a non-empty list.");
   }
 
+  const parsed = input.records.map((row) => ({
+    studentId: row.studentId,
+    status: parseStatus(row.status),
+  }));
+
   const sectionStudents = await prisma.student.findMany({
     where: { sectionId, schoolId },
     select: { id: true },
   });
   const inSection = new Set(sectionStudents.map((row) => row.id));
-
-  const results = [];
-  for (const row of input.records) {
+  for (const row of parsed) {
     if (!inSection.has(row.studentId)) {
       throw forbidden("Student is not in this section.");
     }
-    const status = parseStatus(row.status);
-    const existing = await prisma.attendanceRecord.findUnique({
-      where: { studentId_date: { studentId: row.studentId, date } },
-    });
-    const saved = await prisma.attendanceRecord.upsert({
-      where: { studentId_date: { studentId: row.studentId, date } },
-      create: {
-        schoolId,
-        studentId: row.studentId,
-        date,
-        status,
-        recordedByStaffId: auth.kind === "staff" ? auth.id : null,
-      },
-      update: {
-        status,
-        recordedByStaffId: auth.kind === "staff" ? auth.id : null,
-      },
-    });
-    if (closed && existing && existing.status !== status) {
-      await writeAudit(prisma, {
-        schoolId,
-        actorStaffId: auth.id,
-        action: "ATTENDANCE_CLOSED_PERIOD_AMENDED",
-        entityType: "attendance_record",
-        entityId: saved.id,
-        metadata: {
-          studentId: row.studentId,
-          date: dateOnlyString(date),
-          oldStatus: existing.status,
-          newStatus: status,
-          reason,
-          periodId: covering?.id,
-        },
-      });
-    } else if (closed && !existing) {
-      await writeAudit(prisma, {
-        schoolId,
-        actorStaffId: auth.id,
-        action: "ATTENDANCE_CLOSED_PERIOD_AMENDED",
-        entityType: "attendance_record",
-        entityId: saved.id,
-        metadata: {
-          studentId: row.studentId,
-          date: dateOnlyString(date),
-          oldStatus: null,
-          newStatus: status,
-          reason,
-          periodId: covering?.id,
-        },
-      });
-    }
-    results.push(saved);
   }
-  return results;
+
+  const studentIds = parsed.map((row) => row.studentId);
+  const recorderId = auth.kind === "staff" ? auth.id : null;
+
+  return prisma.$transaction(
+    async (tx) => {
+      const existingRows = await tx.attendanceRecord.findMany({
+        where: { schoolId, date, studentId: { in: studentIds } },
+      });
+      const existingByStudent = new Map(existingRows.map((row) => [row.studentId, row]));
+      const results: AttendanceRow[] = [];
+
+      for (const row of parsed) {
+        const existing = existingByStudent.get(row.studentId);
+        const saved = await tx.attendanceRecord.upsert({
+          where: { studentId_date: { studentId: row.studentId, date } },
+          create: {
+            schoolId,
+            studentId: row.studentId,
+            date,
+            status: row.status,
+            recordedByStaffId: recorderId,
+          },
+          update: {
+            status: row.status,
+            recordedByStaffId: recorderId,
+          },
+        });
+        if (existing && existing.status !== row.status) {
+          await writeAudit(tx, {
+            schoolId,
+            actorStaffId: auth.id,
+            action: closed ? "ATTENDANCE_CLOSED_PERIOD_AMENDED" : "ATTENDANCE_AMENDED",
+            entityType: "attendance_record",
+            entityId: saved.id,
+            metadata: {
+              studentId: row.studentId,
+              date: dateOnlyString(date),
+              oldStatus: existing.status,
+              newStatus: row.status,
+              reason: closed ? reason : reason || undefined,
+              periodId: covering.id,
+            },
+          });
+        }
+        results.push(saved);
+      }
+      return results;
+    },
+    { timeout: 20_000 },
+  );
 }
 
 export async function listSectionAttendance(

@@ -7,6 +7,7 @@ import {
   parentMaySeeStudent,
   requireSchoolScope,
 } from "../middleware/tenancy.ts";
+import { enrollmentInYear, requireActiveYear } from "../services/years.ts";
 
 /** Minimal school-scoped resources so authz can be tested against real rows. Not the product UI. */
 export function resourceRouter(_deps: AppDeps): Router {
@@ -51,10 +52,13 @@ export function resourceRouter(_deps: AppDeps): Router {
       if (!student) throw notFound();
 
       const auth = req.auth!;
+      const activeYear = await requireActiveYear(prisma, schoolId);
+      const enrollment = await enrollmentInYear(prisma, schoolId, student.id, activeYear.id);
       if (auth.role === "parent") {
         parentMaySeeStudent(auth, student.id, student.status);
       } else if (auth.role === "teacher") {
-        assertTeacherAssignedToSection(auth, student.sectionId);
+        if (!enrollment) throw notFound();
+        assertTeacherAssignedToSection(auth, enrollment.sectionId);
       } else if (auth.role !== "school_admin" && auth.role !== "super_admin") {
         throw forbidden();
       }
@@ -64,7 +68,7 @@ export function resourceRouter(_deps: AppDeps): Router {
           id: student.id,
           schoolId: student.schoolId,
           studentCode: student.studentCode,
-          sectionId: student.sectionId,
+          sectionId: enrollment?.sectionId ?? null,
           name: student.name,
           status: student.status,
         },
@@ -88,13 +92,22 @@ export function resourceRouter(_deps: AppDeps): Router {
         where: { id: sectionId, schoolId },
       });
       if (!section) throw notFound();
-
-      const students = await prisma.student.findMany({
-        where: { sectionId: section.id, schoolId: section.schoolId },
-        select: { id: true, name: true, studentCode: true, status: true, sectionId: true, schoolId: true },
-        orderBy: { name: "asc" },
+      const activeYear = await requireActiveYear(prisma, schoolId);
+      const enrollments = await prisma.enrollment.findMany({
+        where: { sectionId: section.id, schoolId: section.schoolId, academicYearId: activeYear.id },
+        include: {
+          student: {
+            select: { id: true, name: true, studentCode: true, status: true, schoolId: true },
+          },
+        },
+        orderBy: { student: { name: "asc" } },
       });
-      res.json({ students });
+      res.json({
+        students: enrollments.map((row) => ({
+          ...row.student,
+          sectionId: row.sectionId,
+        })),
+      });
     }),
   );
 

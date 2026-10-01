@@ -3,8 +3,14 @@ import type { AuthPrincipal } from "@smart-school/shared";
 import { writeAudit } from "../auth/audit.ts";
 import { dateOnlyString, parseDateOnly } from "../dates.ts";
 import { badRequest, forbidden, notFound } from "../http.ts";
-import { assertTeacherAssignedToSection, parentMaySeeStudent } from "../middleware/tenancy.ts";
+import { parentMaySeeStudent } from "../middleware/tenancy.ts";
 import { periodCoveringDate, periodIsClosed } from "./periods.ts";
+import {
+  assertTeacherAssignedToSectionInYear,
+  enrollmentInYear,
+  requireActiveYear,
+  studentIdsInSectionForYear,
+} from "./years.ts";
 
 const STATUSES = new Set(["PRESENT", "ABSENT", "LATE"]);
 
@@ -31,7 +37,6 @@ export async function markSectionAttendance(
   input: { date: string; records: Array<{ studentId: string; status: string }>; reason?: string },
 ): Promise<AttendanceRow[]> {
   if (auth.role === "parent") throw forbidden("Parents cannot mark attendance.");
-  assertTeacherAssignedToSection(auth, sectionId);
 
   const section = await prisma.section.findFirst({ where: { id: sectionId, schoolId } });
   if (!section) throw notFound();
@@ -41,6 +46,7 @@ export async function markSectionAttendance(
   if (!covering) {
     throw badRequest("No academic period covers this date — create or extend the period first.");
   }
+  await assertTeacherAssignedToSectionInYear(prisma, auth, schoolId, sectionId, covering.academicYearId);
   const closed = periodIsClosed(covering.endDate);
   const reason = input.reason?.trim() ?? "";
 
@@ -60,11 +66,13 @@ export async function markSectionAttendance(
     status: parseStatus(row.status),
   }));
 
-  const sectionStudents = await prisma.student.findMany({
-    where: { sectionId, schoolId },
-    select: { id: true },
-  });
-  const inSection = new Set(sectionStudents.map((row) => row.id));
+  const sectionStudents = await studentIdsInSectionForYear(
+    prisma,
+    schoolId,
+    sectionId,
+    covering.academicYearId,
+  );
+  const inSection = new Set(sectionStudents);
   for (const row of parsed) {
     if (!inSection.has(row.studentId)) {
       throw forbidden("Student is not in this section.");
@@ -131,12 +139,22 @@ export async function listSectionAttendance(
   dateStr: string,
 ): Promise<AttendanceRow[]> {
   if (auth.role === "parent") throw forbidden("Parents cannot list a section.");
-  assertTeacherAssignedToSection(auth, sectionId);
   const section = await prisma.section.findFirst({ where: { id: sectionId, schoolId } });
   if (!section) throw notFound();
   const date = parseDateOnly(dateStr);
+  const covering = await periodCoveringDate(prisma, schoolId, date);
+  if (!covering) {
+    throw badRequest("No academic period covers this date — create or extend the period first.");
+  }
+  await assertTeacherAssignedToSectionInYear(prisma, auth, schoolId, sectionId, covering.academicYearId);
+  const enrolledIds = await studentIdsInSectionForYear(
+    prisma,
+    schoolId,
+    sectionId,
+    covering.academicYearId,
+  );
   return prisma.attendanceRecord.findMany({
-    where: { schoolId, date, student: { sectionId } },
+    where: { schoolId, date, studentId: { in: enrolledIds } },
     orderBy: { studentId: "asc" },
   });
 }
@@ -152,6 +170,9 @@ export async function listStudentAttendance(
   const student = await prisma.student.findFirst({ where: { id: studentId, schoolId } });
   if (!student) throw notFound();
 
+  const from = fromStr ? parseDateOnly(fromStr, "from") : undefined;
+  const to = toStr ? parseDateOnly(toStr, "to") : undefined;
+
   if (auth.role === "parent") {
     parentMaySeeStudent(auth, student.id, student.status);
     const school = await prisma.school.findUnique({ where: { id: schoolId } });
@@ -159,13 +180,23 @@ export async function listStudentAttendance(
       throw forbidden("Attendance is not visible to parents at this school.");
     }
   } else if (auth.role === "teacher") {
-    assertTeacherAssignedToSection(auth, student.sectionId);
+    let yearId: string;
+    if (from) {
+      const covering = await periodCoveringDate(prisma, schoolId, from);
+      if (!covering) {
+        throw badRequest("No academic period covers this date — create or extend the period first.");
+      }
+      yearId = covering.academicYearId;
+    } else {
+      yearId = (await requireActiveYear(prisma, schoolId)).id;
+    }
+    const enrollment = await enrollmentInYear(prisma, schoolId, student.id, yearId);
+    if (!enrollment) throw notFound();
+    await assertTeacherAssignedToSectionInYear(prisma, auth, schoolId, enrollment.sectionId, yearId);
   } else if (auth.role !== "school_admin" && auth.role !== "super_admin") {
     throw forbidden();
   }
 
-  const from = fromStr ? parseDateOnly(fromStr, "from") : undefined;
-  const to = toStr ? parseDateOnly(toStr, "to") : undefined;
   return prisma.attendanceRecord.findMany({
     where: {
       schoolId,

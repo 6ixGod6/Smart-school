@@ -19,20 +19,46 @@ describe("tenant composite foreign keys", () => {
     await h.prisma.$disconnect();
   });
 
-  it("rejects a student whose schoolId does not match the section's school", async () => {
+  it("rejects an enrollment whose section belongs to another school", async () => {
+    const student = await h.prisma.student.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentCode: "RIC-26-9999",
+        name: "Cross-tenant student",
+        status: "ACTIVE",
+      },
+    });
     try {
-      await h.prisma.student.create({
+      await h.prisma.enrollment.create({
         data: {
           schoolId: h.ids.schoolA,
+          studentId: student.id,
+          academicYearId: h.ids.yearA,
           sectionId: h.ids.sectionB,
-          studentCode: "RIC-26-9999",
-          name: "Cross-tenant student",
-          status: "ACTIVE",
+          outcome: "PENDING",
         },
       });
-      throw new Error("database accepted a cross-tenant student");
+      throw new Error("database accepted a cross-tenant enrollment");
     } catch (err) {
-      if (err instanceof Error && err.message === "database accepted a cross-tenant student") throw err;
+      if (err instanceof Error && err.message === "database accepted a cross-tenant enrollment") throw err;
+      expect(["P2003", "23503"]).toContain(constraintCode(err));
+    }
+  });
+
+  it("rejects an enrollment that points at another school's year", async () => {
+    try {
+      await h.prisma.enrollment.create({
+        data: {
+          schoolId: h.ids.schoolA,
+          studentId: h.ids.studentAssigned,
+          academicYearId: h.ids.yearB,
+          sectionId: h.ids.sectionAssigned,
+          outcome: "PENDING",
+        },
+      });
+      throw new Error("database accepted a cross-tenant year on enrollment");
+    } catch (err) {
+      if (err instanceof Error && err.message === "database accepted a cross-tenant year on enrollment") throw err;
       expect(["P2003", "23503"]).toContain(constraintCode(err));
     }
   });

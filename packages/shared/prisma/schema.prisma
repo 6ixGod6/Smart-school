@@ -66,6 +66,26 @@ enum Semester {
   SECOND
 }
 
+enum PeriodType {
+  REGULAR
+  SUMMER
+}
+
+enum AcademicYearStatus {
+  PLANNED
+  ACTIVE
+  CLOSED
+}
+
+enum EnrollmentOutcome {
+  PENDING
+  PROMOTED
+  REPEATING
+  GRADUATED
+  WITHDRAWN
+  TRANSFERRED
+}
+
 enum GradeCadence {
   CONTINUOUS
   END_OF_PERIOD
@@ -175,16 +195,17 @@ model School {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   /// Direct School FKs only. Child rows that already carry schoolId via a
-  /// composite FK to a parent (Section → GradeLevel, Student → Section, …)
+  /// composite FK to a parent (Section → GradeLevel, Enrollment → AcademicYear, …)
   /// are not listed here — Prisma cannot attach schoolId to two relations.
-  staffUsers  StaffUser[]
-  parents     Parent[]
-  gradeLevels GradeLevel[]
-  subjects    Subject[]
-  periods     Period[]
-  gradeGroups GradeGroup[]
-  audiences   Audience[]
-  auditLogs   AuditLog[]
+  staffUsers    StaffUser[]
+  parents       Parent[]
+  students      Student[]
+  gradeLevels   GradeLevel[]
+  subjects      Subject[]
+  academicYears AcademicYear[]
+  gradeGroups   GradeGroup[]
+  audiences     Audience[]
+  auditLogs     AuditLog[]
 
   @@map("schools")
 }
@@ -210,6 +231,7 @@ model StaffUser {
   recordedAttendance AttendanceRecord[]  @relation("AttendanceRecorder")
   chargeBatches      ChargeBatch[]       @relation("ChargeBatchCreator")
   events             Event[]             @relation("EventCreator")
+  enrollmentOutcomes Enrollment[]        @relation("EnrollmentOutcomeSetter")
 
   @@unique([schoolId, id])
   @@index([schoolId])
@@ -303,7 +325,7 @@ model ParentLoginAttempt {
 }
 
 // ---------------------------------------------------------------------------
-// Core hierarchy — School → GradeLevel → Section → Student
+// Core hierarchy — School → GradeLevel → Section; Student identity; Enrollment per year
 // ---------------------------------------------------------------------------
 
 model GradeLevel {
@@ -330,7 +352,7 @@ model Section {
   name         String
 
   gradeLevel  GradeLevel          @relation(fields: [schoolId, gradeLevelId], references: [schoolId, id], onDelete: Restrict)
-  students    Student[]
+  enrollments Enrollment[]
   assignments SubjectAssignment[]
 
   @@unique([gradeLevelId, name])
@@ -343,12 +365,12 @@ model Student {
   id          String        @id @default(uuid(7)) @db.Uuid
   schoolId    String        @map("school_id") @db.Uuid
   studentCode String        @map("student_code")
-  sectionId   String        @map("section_id") @db.Uuid
   name        String
   status      StudentStatus @default(ACTIVE)
   enrolledAt  DateTime      @default(now()) @map("enrolled_at") @db.Timestamptz
 
-  section         Section                  @relation(fields: [schoolId, sectionId], references: [schoolId, id], onDelete: Restrict)
+  school          School              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  enrollments     Enrollment[]
   parentLinks     ParentStudentLink[]
   attendance      AttendanceRecord[]
   grades          GradeEntry[]
@@ -360,7 +382,6 @@ model Student {
   @@unique([schoolId, studentCode])
   @@unique([schoolId, id])
   @@index([schoolId])
-  @@index([sectionId])
   @@index([schoolId, status])
   @@map("students")
 }
@@ -378,6 +399,59 @@ model ParentStudentLink {
   @@index([schoolId])
   @@index([studentId])
   @@map("parent_student_links")
+}
+
+/// At most one ACTIVE year per school is enforced by a partial unique index
+/// `academic_years_one_active_per_school` (WHERE status = 'ACTIVE') in SQL —
+/// Prisma cannot express that. Date ranges at one school must not overlap
+/// (`academic_years_dates_no_overlap` gist exclusion).
+model AcademicYear {
+  id        String             @id @default(uuid(7)) @db.Uuid
+  schoolId  String             @map("school_id") @db.Uuid
+  label     String
+  startDate DateTime           @map("start_date") @db.Date
+  endDate   DateTime           @map("end_date") @db.Date
+  status    AcademicYearStatus @default(PLANNED)
+  createdAt DateTime           @default(now()) @map("created_at") @db.Timestamptz
+
+  school        School              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  periods       Period[]
+  enrollments   Enrollment[]
+  assignments   SubjectAssignment[]
+  chargeBatches ChargeBatch[]
+
+  @@unique([schoolId, label])
+  @@unique([schoolId, id])
+  @@index([schoolId])
+  @@index([schoolId, status])
+  @@map("academic_years")
+}
+
+/// One placement per student per year. Repeating the same grade is two rows
+/// in two years, not two rows in one year.
+model Enrollment {
+  id                  String             @id @default(uuid(7)) @db.Uuid
+  schoolId            String             @map("school_id") @db.Uuid
+  studentId           String             @map("student_id") @db.Uuid
+  academicYearId      String             @map("academic_year_id") @db.Uuid
+  sectionId           String             @map("section_id") @db.Uuid
+  outcome             EnrollmentOutcome  @default(PENDING)
+  enrolledAt          DateTime           @default(now()) @map("enrolled_at") @db.Timestamptz
+  outcomeSetAt        DateTime?          @map("outcome_set_at") @db.Timestamptz
+  outcomeSetByStaffId String?            @map("outcome_set_by_staff_id") @db.Uuid
+
+  academicYear  AcademicYear @relation(fields: [schoolId, academicYearId], references: [schoolId, id], onDelete: Restrict)
+  student       Student      @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  section       Section      @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  outcomeSetter StaffUser?   @relation("EnrollmentOutcomeSetter", fields: [outcomeSetByStaffId], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, academicYearId])
+  @@unique([schoolId, id])
+  @@index([schoolId])
+  @@index([studentId])
+  @@index([sectionId])
+  @@index([academicYearId])
+  @@map("enrollments")
 }
 
 // ---------------------------------------------------------------------------
@@ -418,21 +492,24 @@ model GradeLevelSubject {
 }
 
 model SubjectAssignment {
-  id        String @id @default(uuid(7)) @db.Uuid
-  schoolId  String @map("school_id") @db.Uuid
-  teacherId String @map("teacher_id") @db.Uuid
-  subjectId String @map("subject_id") @db.Uuid
-  sectionId String @map("section_id") @db.Uuid
+  id             String @id @default(uuid(7)) @db.Uuid
+  schoolId       String @map("school_id") @db.Uuid
+  academicYearId String @map("academic_year_id") @db.Uuid
+  teacherId      String @map("teacher_id") @db.Uuid
+  subjectId      String @map("subject_id") @db.Uuid
+  sectionId      String @map("section_id") @db.Uuid
 
-  teacher StaffUser @relation(fields: [teacherId], references: [id], onDelete: Restrict)
-  subject Subject   @relation(fields: [subjectId], references: [id], onDelete: Restrict)
-  section Section   @relation(fields: [schoolId, sectionId], references: [schoolId, id], onDelete: Restrict)
+  teacher      StaffUser    @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  section      Section      @relation(fields: [schoolId, sectionId], references: [schoolId, id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
 
-  @@unique([teacherId, subjectId, sectionId])
+  @@unique([teacherId, subjectId, sectionId, academicYearId])
   @@unique([schoolId, id])
   @@index([schoolId])
   @@index([teacherId])
   @@index([sectionId])
+  @@index([academicYearId])
   @@map("subject_assignments")
 }
 
@@ -441,21 +518,26 @@ model SubjectAssignment {
 // ---------------------------------------------------------------------------
 
 model Period {
-  id                 String   @id @default(uuid(7)) @db.Uuid
-  schoolId           String   @map("school_id") @db.Uuid
-  name               String
-  number             Int
-  semester           Semester
-  startDate          DateTime @map("start_date") @db.Date
-  endDate            DateTime @map("end_date") @db.Date
-  gradeEntryDeadline DateTime @map("grade_entry_deadline") @db.Timestamptz
+  id                          String     @id @default(uuid(7)) @db.Uuid
+  schoolId                    String     @map("school_id") @db.Uuid
+  academicYearId              String     @map("academic_year_id") @db.Uuid
+  name                        String
+  number                      Int
+  type                        PeriodType @default(REGULAR)
+  semester                    Semester?
+  startDate                   DateTime   @map("start_date") @db.Date
+  endDate                     DateTime   @map("end_date") @db.Date
+  gradeEntryDeadline          DateTime   @map("grade_entry_deadline") @db.Timestamptz
+  /// Null inherits School.attendanceCountsTowardGrade. SUMMER is always false.
+  attendanceCountsTowardGrade Boolean?   @map("attendance_counts_toward_grade")
 
-  school School       @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  grades GradeEntry[]
+  academicYear AcademicYear @relation(fields: [schoolId, academicYearId], references: [schoolId, id], onDelete: Restrict)
+  grades       GradeEntry[]
 
-  @@unique([schoolId, number])
+  @@unique([schoolId, academicYearId, type, number])
   @@unique([schoolId, id])
   @@index([schoolId])
+  @@index([academicYearId])
   @@map("periods")
 }
 
@@ -581,13 +663,15 @@ model ChargeBatch {
   audienceId       String       @map("audience_id") @db.Uuid
   state            PublishState @default(DRAFT)
   sourceEventId    String?      @map("source_event_id") @db.Uuid
+  academicYearId   String       @map("academic_year_id") @db.Uuid
   createdByStaffId String       @map("created_by_staff_id") @db.Uuid
   publishedAt      DateTime?    @map("published_at") @db.Timestamptz
   cancelledAt      DateTime?    @map("cancelled_at") @db.Timestamptz
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz
 
-  audience    Audience        @relation(fields: [schoolId, audienceId], references: [schoolId, id], onDelete: Restrict)
-  sourceEvent Event?          @relation("EventChargeBatches", fields: [sourceEventId], references: [id], onDelete: SetNull)
+  audience     Audience        @relation(fields: [schoolId, audienceId], references: [schoolId, id], onDelete: Restrict)
+  academicYear AcademicYear    @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  sourceEvent  Event?          @relation("EventChargeBatches", fields: [sourceEventId], references: [id], onDelete: SetNull)
   createdBy   StaffUser       @relation("ChargeBatchCreator", fields: [createdByStaffId], references: [id], onDelete: Restrict)
   items       FeeChargeItem[]
 
@@ -595,6 +679,7 @@ model ChargeBatch {
   @@index([schoolId])
   @@index([audienceId])
   @@index([sourceEventId])
+  @@index([academicYearId])
   @@map("charge_batches")
 }
 

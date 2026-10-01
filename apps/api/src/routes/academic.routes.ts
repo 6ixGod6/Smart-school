@@ -7,13 +7,17 @@ import { requireSchoolScope } from "../middleware/tenancy.ts";
 import { createPeriod, listPeriods, updatePeriod } from "../services/periods.ts";
 import { listSectionAttendance, listStudentAttendance, markSectionAttendance } from "../services/attendance.ts";
 import { getSchoolSettings, updateSchoolSettings } from "../services/settings.ts";
+import { listAcademicYears } from "../services/years.ts";
 
 const periodCreateSchema = z.object({
-  number: z.number().int().min(1).max(6),
+  number: z.number().int().min(1).max(20),
   name: z.string().min(1).optional(),
   startDate: z.string(),
   endDate: z.string(),
   gradeEntryDeadline: z.string(),
+  academicYearId: z.string().uuid().optional(),
+  type: z.enum(["REGULAR", "SUMMER"]).optional(),
+  attendanceCountsTowardGrade: z.boolean().nullable().optional(),
 });
 
 const periodUpdateSchema = z.object({
@@ -21,6 +25,7 @@ const periodUpdateSchema = z.object({
   startDate: z.string().optional(),
   endDate: z.string().optional(),
   gradeEntryDeadline: z.string().optional(),
+  attendanceCountsTowardGrade: z.boolean().nullable().optional(),
 });
 
 const attendanceMarkSchema = z.object({
@@ -39,6 +44,18 @@ const settingsSchema = z.object({
 
 export function academicRouter(_deps: AppDeps): Router {
   const router = Router();
+
+  router.get(
+    "/schools/:schoolId/academic-years",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin", "teacher"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const years = await listAcademicYears(prisma, String(req.params.schoolId));
+      res.json({ academicYears: years });
+    }),
+  );
 
   router.get(
     "/schools/:schoolId/periods",

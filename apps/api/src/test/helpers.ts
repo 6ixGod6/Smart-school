@@ -38,6 +38,8 @@ export type Harness = {
     sectionB: string;
     parentUniqueA: string;
     parentUniqueB: string;
+    yearA: string;
+    yearB: string;
   };
 };
 
@@ -59,6 +61,7 @@ const TABLES = [
   "grade_entries",
   "attendance_records",
   "parent_student_links",
+  "enrollments",
   "subject_assignments",
   "grade_level_subjects",
   "grade_group_grade_levels",
@@ -69,6 +72,7 @@ const TABLES = [
   "sections",
   "subjects",
   "periods",
+  "academic_years",
   "grade_levels",
   "schools",
 ];
@@ -92,6 +96,24 @@ export async function createHarness(): Promise<Harness> {
 
   const schoolA = await prisma.school.create({ data: { name: "Richardsville", idPrefix: "RIC" } });
   const schoolB = await prisma.school.create({ data: { name: "Bomi Academy", idPrefix: "BOM" } });
+  const yearA = await prisma.academicYear.create({
+    data: {
+      schoolId: schoolA.id,
+      label: "2026/2027",
+      startDate: new Date("2026-08-01"),
+      endDate: new Date("2027-07-31"),
+      status: "ACTIVE",
+    },
+  });
+  const yearB = await prisma.academicYear.create({
+    data: {
+      schoolId: schoolB.id,
+      label: "2026/2027",
+      startDate: new Date("2026-08-01"),
+      endDate: new Date("2027-07-31"),
+      status: "ACTIVE",
+    },
+  });
 
   const gradeA = await prisma.gradeLevel.create({
     data: { schoolId: schoolA.id, name: "1st Grade", order: 1 },
@@ -127,6 +149,7 @@ export async function createHarness(): Promise<Harness> {
   await prisma.subjectAssignment.create({
     data: {
       schoolId: schoolA.id,
+      academicYearId: yearA.id,
       teacherId: teacherA.id,
       subjectId: subjectLit.id,
       sectionId: sectionAssigned.id,
@@ -152,7 +175,6 @@ export async function createHarness(): Promise<Harness> {
   const studentAssigned = await prisma.student.create({
     data: {
       schoolId: schoolA.id,
-      sectionId: sectionAssigned.id,
       studentCode: "RIC-26-0001",
       name: "Amina Kollie",
       status: "ACTIVE",
@@ -161,7 +183,6 @@ export async function createHarness(): Promise<Harness> {
   const studentOtherSection = await prisma.student.create({
     data: {
       schoolId: schoolA.id,
-      sectionId: sectionOther.id,
       studentCode: "RIC-26-0002",
       name: "James Doe",
       status: "ACTIVE",
@@ -170,7 +191,6 @@ export async function createHarness(): Promise<Harness> {
   const studentWithdrawn = await prisma.student.create({
     data: {
       schoolId: schoolA.id,
-      sectionId: sectionAssigned.id,
       studentCode: "RIC-26-0003",
       name: "Withdrawn Child",
       status: "WITHDRAWN",
@@ -185,10 +205,45 @@ export async function createHarness(): Promise<Harness> {
   const studentB = await prisma.student.create({
     data: {
       schoolId: schoolB.id,
-      sectionId: sectionB.id,
       studentCode: "BOM-26-0001",
       name: "School B Student",
       status: "ACTIVE",
+    },
+  });
+  await prisma.enrollment.create({
+    data: {
+      schoolId: schoolA.id,
+      studentId: studentAssigned.id,
+      academicYearId: yearA.id,
+      sectionId: sectionAssigned.id,
+      outcome: "PENDING",
+    },
+  });
+  await prisma.enrollment.create({
+    data: {
+      schoolId: schoolA.id,
+      studentId: studentOtherSection.id,
+      academicYearId: yearA.id,
+      sectionId: sectionOther.id,
+      outcome: "PENDING",
+    },
+  });
+  await prisma.enrollment.create({
+    data: {
+      schoolId: schoolA.id,
+      studentId: studentWithdrawn.id,
+      academicYearId: yearA.id,
+      sectionId: sectionAssigned.id,
+      outcome: "PENDING",
+    },
+  });
+  await prisma.enrollment.create({
+    data: {
+      schoolId: schoolB.id,
+      studentId: studentB.id,
+      academicYearId: yearB.id,
+      sectionId: sectionB.id,
+      outcome: "PENDING",
     },
   });
 
@@ -262,6 +317,8 @@ export async function createHarness(): Promise<Harness> {
       sectionB: sectionB.id,
       parentUniqueA: parentUniqueA.id,
       parentUniqueB: parentUniqueB.id,
+      yearA: yearA.id,
+      yearB: yearB.id,
     },
   };
 }

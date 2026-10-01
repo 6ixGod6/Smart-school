@@ -4,6 +4,85 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-01 — Academic years and enrollments (schema + read paths)
+
+### What changed and why
+
+Schema and read paths only. No promotion flow, no year-close guard, no React admin UI.
+
+**A1. `AcademicYear` is a first-class row.** `id`, `schoolId`, `label` (e.g. `2026/2027`), `startDate`, `endDate`, `status` (`PLANNED` | `ACTIVE` | `CLOSED`), `createdAt`. Unique on `(schoolId, label)` and `(schoolId, id)` so child tables can use composite tenant FKs.
+
+**At most one ACTIVE year per school** is a partial unique index, not a Prisma `@@unique`:
+
+```sql
+CREATE UNIQUE INDEX academic_years_one_active_per_school
+  ON academic_years (school_id)
+  WHERE status = 'ACTIVE';
+```
+
+Prisma cannot express a partial unique, so the index lives in migration `20261001180000_academic_years_enrollments`. A second `ACTIVE` row at the same school is rejected by PostgreSQL (`23505` / Prisma `P2002`).
+
+**Years at the same school must not overlap.** Inclusive gist exclusion on `school_id` + `daterange(start_date, end_date, '[]')` (`academic_years_dates_no_overlap`), after `CREATE EXTENSION btree_gist`. Adjacent days (year 1 ends 31 Jul, year 2 starts 1 Aug) are allowed.
+
+**A2. `Period` is year-scoped.** `academicYearId` with composite FK `(schoolId, academicYearId)` → `academic_years`. New `type` (`REGULAR` | `SUMMER`). `semester` is nullable — `SUMMER` has `semester = null` so those periods drop out of semester aggregation with no special case. `attendanceCountsTowardGrade` is a nullable boolean (null inherits the school setting). `SUMMER` is forced `false`; the API returns 400 if a client tries to set it `true` on create or patch. A CHECK (`periods_summer_no_grade_tally`) backs that at the database. Unique is now `(schoolId, academicYearId, type, number)` so summer session 1 does not collide with regular period 1.
+
+**Period overlap stays school-wide** across years and types. `periodCoveringDate` still uses `findFirst`; two covering rows would make the attendance lock non-deterministic. Application `assertNoOverlap` plus gist exclusion `periods_dates_no_overlap` on `school_id` + date range.
+
+**B1–B2. `Enrollment` replaces `Student.sectionId`.** Placement is per year: `studentId` + `academicYearId` unique (one enrollment per student per year). Repeating 3rd grade is two rows in two years, same grade level, same `studentCode`. `Student` is identity only (`studentCode`, `name`, `status`, `enrolledAt`) with a direct `school` FK again. Composite tenant FKs: year `(schoolId, academicYearId)`, student `(schoolId, studentId)`, section `(schoolId, sectionId)`. Outcome enum is stored (`PENDING` default) but no promotion write API this step.
+
+**B3. Read paths resolve enrollment by year.** Dated attendance uses the covering period's `academicYearId`. Undated reads (student GET, section roster, teacher token `sectionIds`) use the school's ACTIVE year. `assertTeacherAssignedToSectionInYear` checks `SubjectAssignment` for that year so a dated mark is not gated only by the active-year token. Section roster is enrollments in the active year, not `Student.sectionId`.
+
+**B4. `SubjectAssignment` is year-scoped.** `academicYearId` + unique `(teacherId, subjectId, sectionId, academicYearId)`. Teacher principal `sectionIds` / `subjectIds` are filtered to the ACTIVE year.
+
+**B5. `ChargeBatch.academicYearId`** is NOT NULL so annual tuition and the once-per-student-per-year platform fee have a year to hang off. No charge write API this step.
+
+**C. Data migration.** One `INSERT` of an ACTIVE year labeled **`2026/2027`** per existing school; dates are `COALESCE(MIN(period.start), 2026-08-01)` / `COALESCE(MAX(period.end), 2027-07-31)`. Existing periods, subject assignments, and charge batches are pointed at that year. One `PENDING` enrollment per student at their then-current `section_id`. Then `students.section_id` is dropped.
+
+Local `smart_school` (and the test database after truncate) had **0 schools** when this migration ran, so the INSERT created **0** `AcademicYear` rows and **0** `Enrollment` rows here. Against a database that already has schools/students, the same SQL creates one ACTIVE `2026/2027` year per school and one PENDING enrollment per student. Do not rename that label afterwards without re-pointing dependents.
+
+Read-only `GET /v1/schools/:schoolId/academic-years` for staff. Period create accepts optional `academicYearId` (defaults to ACTIVE), `type`, and `attendanceCountsTowardGrade`.
+
+### Dependencies added
+
+None. `btree_gist` and `pgcrypto` are PostgreSQL extensions (`CREATE EXTENSION IF NOT EXISTS`), not npm packages.
+
+### High-risk: authorization / tenancy
+
+- Every enrollment, period, assignment, and charge batch still carries `school_id`. Composite FKs reject a School A enrollment that names a School B section or year.
+- Teacher section scoping is year-aware: the JWT principal lists ACTIVE-year assignments; dated attendance re-checks assignments for the covering year. Hiding a section in the UI is still not authorization.
+- No promotion, year-close, or receiving-wallet change in this step.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api typecheck
+tsc --noEmit   (exit 0)
+
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  5 passed (5)
+      Tests  54 passed (54)
+   Start at  11:57:17
+   Duration  28.67s
+```
+
+Adversarial coverage added this step:
+
+- Two enrollments for the same student in the same academic year → unique violation.
+- Same student, same section/grade, two different years (the repeat case) → allowed; `studentCode` unchanged.
+- `SUMMER` period with `attendanceCountsTowardGrade: true` on create or patch → 400.
+- Periods overlapping across two academic years → 409 `PERIOD_OVERLAP`.
+- Second `ACTIVE` year at one school → unique violation on the partial index.
+- Teacher assigned-section roster and student GET still work via active-year enrollments; unassigned section still 403.
+- Cross-tenant enrollment (School A student + School B section, or School A row + School B year) → FK rejection (`P2003` / `23503`).
+- Overlapping year dates at one school → gist exclusion (`23P01`, wrapped as Prisma `P2039`).
+
+Failures: none in this run.
+
+---
+
 ## 2026-10-01 — Step 2 review: auth hardening and attendance correctness
 
 ### What changed and why

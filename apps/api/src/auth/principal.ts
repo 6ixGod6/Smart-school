@@ -20,11 +20,17 @@ export function staffRoleToClaim(role: "TEACHER" | "SCHOOL_ADMIN" | "SUPER_ADMIN
 export async function loadStaffPrincipal(prisma: PrismaClient, staffId: string): Promise<AuthPrincipal | null> {
   const staff = await prisma.staffUser.findUnique({
     where: { id: staffId },
-    include: { assignments: { select: { sectionId: true, subjectId: true } } },
+    include: { assignments: { select: { sectionId: true, subjectId: true, academicYearId: true } } },
   });
   if (!staff || !staff.isActive) return null;
-  const sectionIds = [...new Set(staff.assignments.map((row) => row.sectionId))];
-  const subjectIds = [...new Set(staff.assignments.map((row) => row.subjectId))];
+  const activeYear = staff.schoolId
+    ? await prisma.academicYear.findFirst({ where: { schoolId: staff.schoolId, status: "ACTIVE" } })
+    : null;
+  const currentAssignments = activeYear
+    ? staff.assignments.filter((row) => row.academicYearId === activeYear.id)
+    : [];
+  const sectionIds = [...new Set(currentAssignments.map((row) => row.sectionId))];
+  const subjectIds = [...new Set(currentAssignments.map((row) => row.subjectId))];
   return {
     id: staff.id,
     role: staffRoleToClaim(staff.role),

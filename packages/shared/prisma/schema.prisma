@@ -174,32 +174,17 @@ model School {
   attendanceCountsTowardGrade Boolean       @default(false) @map("attendance_counts_toward_grade")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  staffUsers              StaffUser[]
-  parents                 Parent[]
-  gradeLevels             GradeLevel[]
-  sections                Section[]
-  students                Student[]
-  parentStudentLinks      ParentStudentLink[]
-  subjects                Subject[]
-  gradeLevelSubjects      GradeLevelSubject[]
-  subjectAssignments      SubjectAssignment[]
-  periods                 Period[]
-  attendanceRecords       AttendanceRecord[]
-  gradeEntries            GradeEntry[]
-  gradeGroups             GradeGroup[]
-  gradeGroupGradeLevels   GradeGroupGradeLevel[]
-  audiences               Audience[]
-  audienceSnapshotMembers AudienceSnapshotMember[]
-  chargeBatches           ChargeBatch[]
-  feeChargeItems          FeeChargeItem[]
-  events                  Event[]
-  eventParticipations     EventParticipation[]
-  payments                Payment[]
-  paymentChargeItems      PaymentChargeItem[]
-  receipts                Receipt[]
-  notifications           Notification[]
-  pushSubscriptions       PushSubscription[]
-  auditLogs               AuditLog[]
+  /// Direct School FKs only. Child rows that already carry schoolId via a
+  /// composite FK to a parent (Section → GradeLevel, Student → Section, …)
+  /// are not listed here — Prisma cannot attach schoolId to two relations.
+  staffUsers  StaffUser[]
+  parents     Parent[]
+  gradeLevels GradeLevel[]
+  subjects    Subject[]
+  periods     Period[]
+  gradeGroups GradeGroup[]
+  audiences   Audience[]
+  auditLogs   AuditLog[]
 
   @@map("schools")
 }
@@ -226,6 +211,7 @@ model StaffUser {
   chargeBatches      ChargeBatch[]       @relation("ChargeBatchCreator")
   events             Event[]             @relation("EventCreator")
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("staff_users")
 }
@@ -253,6 +239,7 @@ model Parent {
   payments            Payment[]
 
   @@unique([schoolId, phone])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([phone])
   @@map("parents")
@@ -309,12 +296,13 @@ model GradeLevel {
   name     String
   order    Int
 
-  school     School              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  sections   Section[]
-  subjects   GradeLevelSubject[]
+  school      School                 @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  sections    Section[]
+  subjects    GradeLevelSubject[]
   gradeGroups GradeGroupGradeLevel[]
 
   @@unique([schoolId, name])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("grade_levels")
 }
@@ -325,12 +313,12 @@ model Section {
   gradeLevelId String @map("grade_level_id") @db.Uuid
   name         String
 
-  school     School              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  gradeLevel GradeLevel          @relation(fields: [gradeLevelId], references: [id], onDelete: Restrict)
-  students   Student[]
+  gradeLevel  GradeLevel          @relation(fields: [schoolId, gradeLevelId], references: [schoolId, id], onDelete: Restrict)
+  students    Student[]
   assignments SubjectAssignment[]
 
   @@unique([gradeLevelId, name])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("sections")
 }
@@ -344,8 +332,7 @@ model Student {
   status      StudentStatus @default(ACTIVE)
   enrolledAt  DateTime      @default(now()) @map("enrolled_at") @db.Timestamptz
 
-  school          School                 @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  section         Section                @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  section         Section                  @relation(fields: [schoolId, sectionId], references: [schoolId, id], onDelete: Restrict)
   parentLinks     ParentStudentLink[]
   attendance      AttendanceRecord[]
   grades          GradeEntry[]
@@ -355,6 +342,7 @@ model Student {
   audienceMembers AudienceSnapshotMember[]
 
   @@unique([schoolId, studentCode])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([sectionId])
   @@index([schoolId, status])
@@ -367,9 +355,8 @@ model ParentStudentLink {
   schoolId     String @map("school_id") @db.Uuid
   relationship String
 
-  parent  Parent  @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  parent  Parent  @relation(fields: [schoolId, parentId], references: [schoolId, id], onDelete: Restrict)
   student Student @relation(fields: [studentId], references: [id], onDelete: Restrict)
-  school  School  @relation(fields: [schoolId], references: [id], onDelete: Restrict)
 
   @@id([parentId, studentId])
   @@index([schoolId])
@@ -396,6 +383,7 @@ model Subject {
   grades      GradeEntry[]
 
   @@unique([schoolId, nameNormalized])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("subjects")
 }
@@ -405,8 +393,7 @@ model GradeLevelSubject {
   gradeLevelId String @map("grade_level_id") @db.Uuid
   subjectId    String @map("subject_id") @db.Uuid
 
-  school     School     @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  gradeLevel GradeLevel @relation(fields: [gradeLevelId], references: [id], onDelete: Restrict)
+  gradeLevel GradeLevel @relation(fields: [schoolId, gradeLevelId], references: [schoolId, id], onDelete: Restrict)
   subject    Subject    @relation(fields: [subjectId], references: [id], onDelete: Restrict)
 
   @@id([gradeLevelId, subjectId])
@@ -421,12 +408,12 @@ model SubjectAssignment {
   subjectId String @map("subject_id") @db.Uuid
   sectionId String @map("section_id") @db.Uuid
 
-  school  School    @relation(fields: [schoolId], references: [id], onDelete: Restrict)
   teacher StaffUser @relation(fields: [teacherId], references: [id], onDelete: Restrict)
   subject Subject   @relation(fields: [subjectId], references: [id], onDelete: Restrict)
-  section Section   @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  section Section   @relation(fields: [schoolId, sectionId], references: [schoolId, id], onDelete: Restrict)
 
   @@unique([teacherId, subjectId, sectionId])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([teacherId])
   @@index([sectionId])
@@ -447,10 +434,11 @@ model Period {
   endDate            DateTime @map("end_date") @db.Date
   gradeEntryDeadline DateTime @map("grade_entry_deadline") @db.Timestamptz
 
-  school School      @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  school School       @relation(fields: [schoolId], references: [id], onDelete: Restrict)
   grades GradeEntry[]
 
   @@unique([schoolId, number])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("periods")
 }
@@ -464,9 +452,8 @@ model AttendanceRecord {
   recordedByStaffId String?          @map("recorded_by_staff_id") @db.Uuid
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz
 
-  school      School     @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  student     Student    @relation(fields: [studentId], references: [id], onDelete: Restrict)
-  recordedBy  StaffUser? @relation("AttendanceRecorder", fields: [recordedByStaffId], references: [id], onDelete: SetNull)
+  student    Student    @relation(fields: [schoolId, studentId], references: [schoolId, id], onDelete: Restrict)
+  recordedBy StaffUser? @relation("AttendanceRecorder", fields: [recordedByStaffId], references: [id], onDelete: SetNull)
 
   @@unique([studentId, date])
   @@index([schoolId])
@@ -489,8 +476,7 @@ model GradeEntry {
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz
 
-  school  School  @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  student Student @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  student Student @relation(fields: [schoolId, studentId], references: [schoolId, id], onDelete: Restrict)
   subject Subject @relation(fields: [subjectId], references: [id], onDelete: Restrict)
   period  Period  @relation(fields: [periodId], references: [id], onDelete: Restrict)
 
@@ -510,10 +496,11 @@ model GradeGroup {
   schoolId String @map("school_id") @db.Uuid
   name     String
 
-  school    School                 @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  members   GradeGroupGradeLevel[]
+  school  School                 @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  members GradeGroupGradeLevel[]
 
   @@unique([schoolId, name])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("grade_groups")
 }
@@ -523,9 +510,8 @@ model GradeGroupGradeLevel {
   gradeLevelId String @map("grade_level_id") @db.Uuid
   schoolId     String @map("school_id") @db.Uuid
 
-  gradeGroup GradeGroup @relation(fields: [gradeGroupId], references: [id], onDelete: Cascade)
+  gradeGroup GradeGroup @relation(fields: [schoolId, gradeGroupId], references: [schoolId, id], onDelete: Cascade)
   gradeLevel GradeLevel @relation(fields: [gradeLevelId], references: [id], onDelete: Restrict)
-  school     School     @relation(fields: [schoolId], references: [id], onDelete: Restrict)
 
   @@id([gradeGroupId, gradeLevelId])
   @@index([schoolId])
@@ -546,6 +532,7 @@ model Audience {
   chargeBatches ChargeBatch[]
   events        Event[]
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@map("audiences")
 }
@@ -555,9 +542,8 @@ model AudienceSnapshotMember {
   studentId  String @map("student_id") @db.Uuid
   schoolId   String @map("school_id") @db.Uuid
 
-  audience Audience @relation(fields: [audienceId], references: [id], onDelete: Cascade)
+  audience Audience @relation(fields: [schoolId, audienceId], references: [schoolId, id], onDelete: Cascade)
   student  Student  @relation(fields: [studentId], references: [id], onDelete: Restrict)
-  school   School   @relation(fields: [schoolId], references: [id], onDelete: Restrict)
 
   @@id([audienceId, studentId])
   @@index([schoolId])
@@ -584,12 +570,12 @@ model ChargeBatch {
   cancelledAt      DateTime?    @map("cancelled_at") @db.Timestamptz
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz
 
-  school    School          @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  audience  Audience        @relation(fields: [audienceId], references: [id], onDelete: Restrict)
-  sourceEvent Event?        @relation("EventChargeBatches", fields: [sourceEventId], references: [id], onDelete: SetNull)
-  createdBy StaffUser       @relation("ChargeBatchCreator", fields: [createdByStaffId], references: [id], onDelete: Restrict)
-  items     FeeChargeItem[]
+  audience    Audience        @relation(fields: [schoolId, audienceId], references: [schoolId, id], onDelete: Restrict)
+  sourceEvent Event?          @relation("EventChargeBatches", fields: [sourceEventId], references: [id], onDelete: SetNull)
+  createdBy   StaffUser       @relation("ChargeBatchCreator", fields: [createdByStaffId], references: [id], onDelete: Restrict)
+  items       FeeChargeItem[]
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([audienceId])
   @@index([sourceEventId])
@@ -608,12 +594,12 @@ model FeeChargeItem {
   sourceEventId String?      @map("source_event_id") @db.Uuid
   createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz
 
-  school      School              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  student     Student             @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  student     Student             @relation(fields: [schoolId, studentId], references: [schoolId, id], onDelete: Restrict)
   chargeBatch ChargeBatch?        @relation(fields: [chargeBatchId], references: [id], onDelete: Restrict)
   sourceEvent Event?              @relation("EventFeeCharges", fields: [sourceEventId], references: [id], onDelete: SetNull)
   payments    PaymentChargeItem[]
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([studentId])
   @@index([chargeBatchId])
@@ -639,13 +625,13 @@ model Event {
   cancelledAt      DateTime?    @map("cancelled_at") @db.Timestamptz
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz
 
-  school          School               @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  audience        Audience             @relation(fields: [audienceId], references: [id], onDelete: Restrict)
-  createdBy       StaffUser            @relation("EventCreator", fields: [createdByStaffId], references: [id], onDelete: Restrict)
-  participations  EventParticipation[]
-  chargeBatches   ChargeBatch[]        @relation("EventChargeBatches")
-  feeCharges      FeeChargeItem[]      @relation("EventFeeCharges")
+  audience       Audience             @relation(fields: [schoolId, audienceId], references: [schoolId, id], onDelete: Restrict)
+  createdBy      StaffUser            @relation("EventCreator", fields: [createdByStaffId], references: [id], onDelete: Restrict)
+  participations EventParticipation[]
+  chargeBatches  ChargeBatch[]        @relation("EventChargeBatches")
+  feeCharges     FeeChargeItem[]      @relation("EventFeeCharges")
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([audienceId])
   @@map("events")
@@ -659,9 +645,8 @@ model EventParticipation {
   confirmedAt         DateTime  @map("confirmed_at") @db.Timestamptz
   declinedAt          DateTime? @map("declined_at") @db.Timestamptz
 
-  event       Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event       Event   @relation(fields: [schoolId, eventId], references: [schoolId, id], onDelete: Cascade)
   student     Student @relation(fields: [studentId], references: [id], onDelete: Restrict)
-  school      School  @relation(fields: [schoolId], references: [id], onDelete: Restrict)
   confirmedBy Parent  @relation(fields: [confirmedByParentId], references: [id], onDelete: Restrict)
 
   @@id([eventId, studentId])
@@ -683,11 +668,11 @@ model Payment {
   paidAt         DateTime?       @map("paid_at") @db.Timestamptz
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz
 
-  school  School              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  parent  Parent              @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  parent  Parent              @relation(fields: [schoolId, parentId], references: [schoolId, id], onDelete: Restrict)
   items   PaymentChargeItem[]
   receipt Receipt?
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([parentId])
   @@map("payments")
@@ -699,9 +684,8 @@ model PaymentChargeItem {
   schoolId      String  @map("school_id") @db.Uuid
   amountApplied Decimal @map("amount_applied") @db.Decimal(12, 2)
 
-  payment    Payment       @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  payment    Payment       @relation(fields: [schoolId, paymentId], references: [schoolId, id], onDelete: Restrict)
   chargeItem FeeChargeItem @relation(fields: [chargeItemId], references: [id], onDelete: Restrict)
-  school     School        @relation(fields: [schoolId], references: [id], onDelete: Restrict)
 
   @@id([paymentId, chargeItemId])
   @@index([schoolId])
@@ -717,9 +701,9 @@ model Receipt {
   /// Immutable itemization snapshot, taken at issue time.
   lineItems Json     @map("line_items")
 
-  school  School  @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  payment Payment @relation(fields: [schoolId, paymentId], references: [schoolId, id], onDelete: Restrict)
 
+  @@unique([schoolId, paymentId])
   @@index([schoolId])
   @@map("receipts")
 }
@@ -745,10 +729,10 @@ model Notification {
   linkId         String?                @map("link_id")
   resolvesWhen   Json?                  @map("resolves_when")
 
-  school  School   @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  parent  Parent   @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  parent  Parent   @relation(fields: [schoolId, parentId], references: [schoolId, id], onDelete: Restrict)
   student Student? @relation(fields: [studentId], references: [id], onDelete: Restrict)
 
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([parentId, createdAt])
   @@index([studentId])
@@ -767,10 +751,10 @@ model PushSubscription {
   lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz
   revokedAt  DateTime? @map("revoked_at") @db.Timestamptz
 
-  school School @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  parent Parent @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  parent Parent @relation(fields: [schoolId, parentId], references: [schoolId, id], onDelete: Restrict)
 
   @@unique([endpoint])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([parentId])
   @@map("push_subscriptions")

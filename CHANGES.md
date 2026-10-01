@@ -4,6 +4,64 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-01 — Review rework A1–A3 + step 2 backend (periods, attendance, settings)
+
+### What changed and why
+
+Three code-review items from step 1, then §14 step 2 **backend only** (no React admin UI).
+
+**A1. Cross-school rows are now impossible at the database.** Child tables that carry both `school_id` and a parent id now point at `UNIQUE (school_id, id)` on the parent. Prisma can attach `schoolId` to only one relation per model, so the remaining tenant FKs (parent–student link → student, assignment → teacher/subject, grade entry → period/subject, and so on) live in migration `20261001120000_tenant_composite_fks`. A test inserts a School A student into a School B section (and a cross-school parent–student link) and asserts PostgreSQL rejects it.
+
+**A2. Refresh tokens left the JSON body.** Login/refresh set an httpOnly cookie (`refresh_token`, `SameSite=Lax`, `Secure` in production, `Path=/v1/auth`). The access token still comes back in JSON. `/v1/auth/refresh` and `/v1/auth/logout` read the cookie. Path is the auth prefix, not only `/v1/auth/refresh`, so logout can clear the same cookie without sending it to attendance or fee routes. Same-origin deploy (`/api` on the PWA domain) is the intended production shape.
+
+**A3. Multi-school parent login proves the PIN first.** A phone at two schools no longer returns `SCHOOL_SELECTION_REQUIRED` before a correct PIN. Wrong PIN on a multi-school number is the same generic 401 as an unknown phone. A PIN that matches exactly one school logs in with no picker. Identical PINs at two schools then return the picker, naming schools only — never children.
+
+**Lockout (A3):** failed-attempt counters increment only when the caller has named a school (`schoolId`) or when the phone maps to a single parent row. A typo against a multi-school number without `schoolId` returns 401 and does **not** bump every school that phone belongs to. Once the client sends `schoolId`, lockout is per that school's parent row; locking School A does not lock School B.
+
+**B1–B5. Periods, attendance, period lock, school settings.** School admins create/update/list periods 1–6 (semester 1 = 1–3, semester 2 = 4–6), with start/end/grade-entry deadline, no overlap, `endDate` after `startDate`. Teachers upsert attendance for assigned sections (`recordedByStaffId`). Dates in a period whose `end_date` has passed are read-only for teachers (403, no override). A school admin may amend a closed period only with a non-empty reason; each change writes `ATTENDANCE_CLOSED_PERIOD_AMENDED` (who, when, student, old/new status, reason). Period is resolved from the date — no `periodId` on `AttendanceRecord`. School settings (`gradeCadence`, `publishTiming`, `publishGraceHours`, `attendanceVisibleToParents`, `attendanceCountsTowardGrade`) are GET/PATCH on the existing `School` columns. Teachers see assigned sections; admins see any section in their school; parents see linked ACTIVE children only if `attendanceVisibleToParents` is true.
+
+### Dependencies added
+
+None. No new packages.
+
+### High-risk: authentication and tenancy
+
+- Refresh token is no longer readable by JavaScript in the PWA. XSS can still steal the short-lived access token; it cannot steal the refresh cookie. Cookie `Secure` is on in production only (tests and local HTTP omit it).
+- Tenant consistency is enforced by PostgreSQL composite FKs, not only application filters. Application authorization (role + `school_id` on every school-scoped request) is unchanged and still required.
+- Parent login no longer discloses “this phone is a multi-school parent” to an unauthenticated caller. School names appear only after a PIN that matches more than one school.
+- Attendance writes check role, school, teacher assignment, and period lock on the server. Parents cannot write. School A cannot mark School B. Teachers cannot write into a closed period; admins need a reason plus an audit row.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  4 passed (4)
+      Tests  39 passed (39)
+   Start at  09:22:29
+   Duration  27.93s
+```
+
+`pnpm --filter @smart-school/api typecheck` (`tsc --noEmit`) also passed.
+
+Adversarial coverage added this step:
+
+- Database rejects a student whose `schoolId` does not match the section, and a parent–student link across schools.
+- Refresh token is httpOnly / SameSite=Lax / Path=/v1/auth and absent from the JSON body; rotation still kills reuse; body `refreshToken` is ignored.
+- Wrong PIN on a multi-school phone → 401 (not 409); unique PIN at one of two schools → login, no picker; identical PIN → selection payload with school id/name only; named-school lockout does not lock the other school.
+- Teacher marking an unassigned section → 403.
+- Teacher writing into a closed period → 403.
+- Admin amending a closed period without a reason → 400; with a reason → 200 + audit row.
+- School A user touching School B attendance → 403.
+- Parent attendance write → 403.
+- Parent attendance read when `attendanceVisibleToParents` is false → 403.
+
+Failures: none in this run.
+
+---
+
 ## 2026-09-30 — Step 1: monorepo, schema, auth
 
 ### What changed and why

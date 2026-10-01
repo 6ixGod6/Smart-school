@@ -3,6 +3,7 @@ import express from "express";
 import helmet from "helmet";
 import type { AppDeps } from "./auth/principal.ts";
 import { errorHandler } from "./middleware/errorHandler.ts";
+import { academicRouter } from "./routes/academic.routes.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { resourceRouter } from "./routes/resource.routes.ts";
 
@@ -20,6 +21,7 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.use("/v1/auth", authRouter(deps));
   app.use("/v1", resourceRouter(deps));
+  app.use("/v1", academicRouter(deps));
   app.use(errorHandler);
   return app;
 }

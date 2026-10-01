@@ -8,6 +8,7 @@ import {
   PASSWORD_TEACHER,
   PIN_A,
   PIN_SHARED,
+  assertRefreshCookie,
   bearer,
   createHarness,
   expectStatus,
@@ -17,7 +18,7 @@ import {
 describe("authentication and authorization", () => {
   let h: Harness;
   let adminAToken: string;
-  let adminARefresh: string;
+  let adminARefreshCookie: string;
   let teacherToken: string;
   let parentAToken: string;
   let adminBToken: string;
@@ -30,19 +31,21 @@ describe("authentication and authorization", () => {
       .send({ email: "admin.a@school.test", password: PASSWORD_A });
     expectStatus(adminA, 200, "admin A login");
     adminAToken = adminA.body.accessToken;
-    adminARefresh = adminA.body.refreshToken;
+    adminARefreshCookie = assertRefreshCookie(adminA);
 
     const teacher = await request(h.app)
       .post("/v1/auth/staff/login")
       .send({ email: "teacher.a@school.test", password: PASSWORD_TEACHER });
     expectStatus(teacher, 200, "teacher login");
     teacherToken = teacher.body.accessToken;
+    assertRefreshCookie(teacher);
 
     const parent = await request(h.app)
       .post("/v1/auth/parent/login")
       .send({ phone: "+231770000001", pin: PIN_A });
     expectStatus(parent, 200, "parent A login");
     parentAToken = parent.body.accessToken;
+    assertRefreshCookie(parent);
 
     const adminB = await request(h.app)
       .post("/v1/auth/staff/login")
@@ -69,6 +72,7 @@ describe("authentication and authorization", () => {
     expect(res.body.user.role).toBe("school_admin");
     expect(res.body.user.schoolId).toBe(h.ids.schoolA);
     expect(res.body.expiresInSeconds).toBe(15 * 60);
+    assertRefreshCookie(res);
   });
 
   it("rejects a wrong staff password with the same error as an unknown email", async () => {
@@ -225,19 +229,23 @@ describe("authentication and authorization", () => {
     expectStatus(res, 200, "super admin cross-school staff list");
   });
 
-  it("rotates refresh tokens and rejects reuse of the old one", async () => {
-    const first = await request(h.app).post("/v1/auth/refresh").send({ refreshToken: adminARefresh });
+  it("rotates the refresh cookie and rejects reuse of the old one", async () => {
+    const first = await request(h.app).post("/v1/auth/refresh").set("Cookie", adminARefreshCookie);
     expectStatus(first, 200, "refresh rotation");
     expect(first.body.accessToken).toBeTruthy();
-    expect(first.body.refreshToken).not.toBe(adminARefresh);
+    const rotated = assertRefreshCookie(first);
+    expect(rotated).not.toBe(adminARefreshCookie);
 
-    const reused = await request(h.app).post("/v1/auth/refresh").send({ refreshToken: adminARefresh });
+    const reused = await request(h.app).post("/v1/auth/refresh").set("Cookie", adminARefreshCookie);
     expectStatus(reused, 401, "refresh reuse");
 
-    const second = await request(h.app)
-      .post("/v1/auth/refresh")
-      .send({ refreshToken: first.body.refreshToken });
+    const second = await request(h.app).post("/v1/auth/refresh").set("Cookie", rotated);
     expectStatus(second, 401, "family revoked after reuse");
+  });
+
+  it("rejects refresh when the cookie is missing", async () => {
+    const res = await request(h.app).post("/v1/auth/refresh").send({ refreshToken: "not-accepted" });
+    expectStatus(res, 401, "refresh without cookie");
   });
 
   it("locks a parent after too many bad PIN attempts", async () => {
@@ -259,18 +267,67 @@ describe("authentication and authorization", () => {
     expectStatus(lockedRight, 429, "parent lockout even with correct pin");
   });
 
-  it("asks for a school when the same phone exists at two schools", async () => {
+  it("returns the generic 401 for a wrong PIN on a multi-school phone", async () => {
+    const wrong = await request(h.app)
+      .post("/v1/auth/parent/login")
+      .send({ phone: "+231770000099", pin: "000000" });
+    const unknown = await request(h.app)
+      .post("/v1/auth/parent/login")
+      .send({ phone: "+231770000000", pin: "000000" });
+    expectStatus(wrong, 401, "multi-school wrong pin");
+    expectStatus(unknown, 401, "unknown phone");
+    expect(wrong.body.error.code).toBe("UNAUTHENTICATED");
+    expect(wrong.body.error.code).toBe(unknown.body.error.code);
+    expect(wrong.body.error.message).toBe(unknown.body.error.message);
+  });
+
+  it("logs in with no picker when the PIN matches only one school", async () => {
+    const res = await request(h.app)
+      .post("/v1/auth/parent/login")
+      .send({ phone: "+231770000088", pin: PIN_A });
+    expectStatus(res, 200, "unique pin at one of two schools");
+    expect(res.body.user.schoolId).toBe(h.ids.schoolA);
+    expect(res.body.error).toBeUndefined();
+  });
+
+  it("asks for a school only after the same PIN matches more than one school", async () => {
     const ambiguous = await request(h.app)
       .post("/v1/auth/parent/login")
       .send({ phone: "+231770000099", pin: PIN_SHARED });
-    expectStatus(ambiguous, 409, "multi-school phone without schoolId");
+    expectStatus(ambiguous, 409, "identical pin at two schools");
     expect(ambiguous.body.error.code).toBe("SCHOOL_SELECTION_REQUIRED");
+    const schools = ambiguous.body.error.details?.schools as Array<Record<string, unknown>>;
+    expect(Array.isArray(schools)).toBe(true);
+    expect(schools).toHaveLength(2);
+    for (const school of schools) {
+      expect(Object.keys(school).sort()).toEqual(["id", "name"]);
+    }
+    expect(JSON.stringify(ambiguous.body)).not.toMatch(/student|child|children/i);
 
     const picked = await request(h.app)
       .post("/v1/auth/parent/login")
       .send({ phone: "+231770000099", pin: PIN_SHARED, schoolId: h.ids.schoolB });
     expectStatus(picked, 200, "multi-school phone with schoolId");
     expect(picked.body.user.schoolId).toBe(h.ids.schoolB);
+  });
+
+  it("does not lock the other school when a named schoolId PIN is wrong", async () => {
+    for (let i = 0; i < 5; i += 1) {
+      const failed = await request(h.app)
+        .post("/v1/auth/parent/login")
+        .send({ phone: "+231770000099", pin: "000000", schoolId: h.ids.schoolA });
+      expectStatus(failed, 401, `named-school bad pin ${i + 1}`);
+    }
+    const lockedA = await request(h.app)
+      .post("/v1/auth/parent/login")
+      .send({ phone: "+231770000099", pin: PIN_SHARED, schoolId: h.ids.schoolA });
+    expectStatus(lockedA, 429, "school A parent locked");
+
+    const schoolBOk = await request(h.app)
+      .post("/v1/auth/parent/login")
+      .send({ phone: "+231770000099", pin: PIN_SHARED, schoolId: h.ids.schoolB });
+    expectStatus(schoolBOk, 200, "school B parent still open");
+    expect(schoolBOk.body.user.schoolId).toBe(h.ids.schoolB);
   });
 
   it("lets a parent change their PIN and then log in with the new one", async () => {

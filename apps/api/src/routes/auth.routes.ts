@@ -2,8 +2,15 @@ import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import { loginParent, loginStaff, logout, refreshSession, setParentPin } from "../auth/service.ts";
+import {
+  clearRefreshCookie,
+  publicSession,
+  readRefreshCookie,
+  refreshCookieMaxAgeMs,
+  setRefreshCookie,
+} from "../auth/cookies.ts";
 import type { AppDeps } from "../auth/principal.ts";
-import { asyncHandler } from "../http.ts";
+import { asyncHandler, unauthenticated } from "../http.ts";
 import { requireAuth } from "../middleware/auth.ts";
 
 const staffLoginSchema = z
@@ -22,14 +29,14 @@ const parentLoginSchema = z.object({
   schoolId: z.string().uuid().optional(),
 });
 
-const refreshSchema = z.object({
-  refreshToken: z.string().min(10),
-});
-
 const pinSchema = z.object({
   currentPin: z.string().min(1),
   newPin: z.string().min(1),
 });
+
+function cookieSecure(deps: AppDeps): boolean {
+  return deps.config.nodeEnv === "production";
+}
 
 export function authRouter(deps: AppDeps): Router {
   const router = Router();
@@ -48,7 +55,8 @@ export function authRouter(deps: AppDeps): Router {
     asyncHandler(async (req, res) => {
       const body = staffLoginSchema.parse(req.body);
       const result = await loginStaff(deps, body, req.get("user-agent") ?? undefined);
-      res.json(result);
+      setRefreshCookie(res, result.refreshToken, refreshCookieMaxAgeMs(result.user.kind, deps.config), cookieSecure(deps));
+      res.json(publicSession(result));
     }),
   );
 
@@ -58,24 +66,28 @@ export function authRouter(deps: AppDeps): Router {
     asyncHandler(async (req, res) => {
       const body = parentLoginSchema.parse(req.body);
       const result = await loginParent(deps, body, req.get("user-agent") ?? undefined);
-      res.json(result);
+      setRefreshCookie(res, result.refreshToken, refreshCookieMaxAgeMs(result.user.kind, deps.config), cookieSecure(deps));
+      res.json(publicSession(result));
     }),
   );
 
   router.post(
     "/refresh",
     asyncHandler(async (req, res) => {
-      const body = refreshSchema.parse(req.body);
-      const result = await refreshSession(deps, body.refreshToken, req.get("user-agent") ?? undefined);
-      res.json(result);
+      const token = readRefreshCookie(req);
+      if (!token) throw unauthenticated("Invalid refresh token.");
+      const result = await refreshSession(deps, token, req.get("user-agent") ?? undefined);
+      setRefreshCookie(res, result.refreshToken, refreshCookieMaxAgeMs(result.user.kind, deps.config), cookieSecure(deps));
+      res.json(publicSession(result));
     }),
   );
 
   router.post(
     "/logout",
     asyncHandler(async (req, res) => {
-      const body = refreshSchema.parse(req.body);
-      await logout(deps, body.refreshToken);
+      const token = readRefreshCookie(req);
+      if (token) await logout(deps, token);
+      clearRefreshCookie(res, cookieSecure(deps));
       res.status(204).send();
     }),
   );

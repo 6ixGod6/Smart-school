@@ -18,6 +18,10 @@ export function forbidden(message = "You do not have permission to do that"): Ap
   return new AppError(403, "FORBIDDEN", message);
 }
 
+export function badRequest(message: string, details?: unknown): AppError {
+  return new AppError(400, "VALIDATION_ERROR", message, details);
+}
+
 export function notFound(message = "Not found"): AppError {
   return new AppError(404, "NOT_FOUND", message);
 }

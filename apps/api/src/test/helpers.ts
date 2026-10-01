@@ -1,5 +1,6 @@
 import { createPrisma, type PrismaClient } from "@smart-school/shared";
 import request from "supertest";
+import { REFRESH_COOKIE_NAME } from "../auth/cookies.ts";
 import { createApp } from "../app.ts";
 import { loadConfig, type AppConfig } from "../config.ts";
 import { hashSecret } from "../auth/passwords.ts";
@@ -34,6 +35,9 @@ export type Harness = {
     studentWithdrawn: string;
     studentB: string;
     subjectLit: string;
+    sectionB: string;
+    parentUniqueA: string;
+    parentUniqueB: string;
   };
 };
 
@@ -224,6 +228,12 @@ export async function createHarness(): Promise<Harness> {
   const parentSharedB = await prisma.parent.create({
     data: { schoolId: schoolB.id, phone: "+231770000099", pinHash: pinShared, mustChangePin: false },
   });
+  const parentUniqueA = await prisma.parent.create({
+    data: { schoolId: schoolA.id, phone: "+231770000088", pinHash: pinA, mustChangePin: false },
+  });
+  const parentUniqueB = await prisma.parent.create({
+    data: { schoolId: schoolB.id, phone: "+231770000088", pinHash: pinB, mustChangePin: false },
+  });
 
   const app = createApp({ prisma, config });
   return {
@@ -248,12 +258,48 @@ export async function createHarness(): Promise<Harness> {
       studentWithdrawn: studentWithdrawn.id,
       studentB: studentB.id,
       subjectLit: subjectLit.id,
+      sectionB: sectionB.id,
+      parentUniqueA: parentUniqueA.id,
+      parentUniqueB: parentUniqueB.id,
     },
   };
 }
 
 export function bearer(token: string) {
   return { Authorization: `Bearer ${token}` };
+}
+
+/** First `name=value` pair of the refresh Set-Cookie, suitable for a Cookie header. */
+export function refreshCookieHeader(res: request.Response): string {
+  const raw = res.headers["set-cookie"];
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const match = list.find((row) => row.startsWith(`${REFRESH_COOKIE_NAME}=`));
+  if (!match) {
+    throw new Error(`missing ${REFRESH_COOKIE_NAME} Set-Cookie. Headers: ${JSON.stringify(list)}`);
+  }
+  return match.split(";")[0]!;
+}
+
+export function assertRefreshCookie(res: request.Response): string {
+  const raw = res.headers["set-cookie"];
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const match = list.find((row) => row.startsWith(`${REFRESH_COOKIE_NAME}=`));
+  if (!match) {
+    throw new Error(`missing ${REFRESH_COOKIE_NAME} Set-Cookie. Headers: ${JSON.stringify(list)}`);
+  }
+  if (!/HttpOnly/i.test(match)) {
+    throw new Error(`refresh cookie is not HttpOnly: ${match}`);
+  }
+  if (!/SameSite=Lax/i.test(match)) {
+    throw new Error(`refresh cookie SameSite is not Lax: ${match}`);
+  }
+  if (!/Path=\/v1\/auth/i.test(match)) {
+    throw new Error(`refresh cookie path is not /v1/auth: ${match}`);
+  }
+  if (res.body.refreshToken) {
+    throw new Error("refresh token must not appear in the JSON body");
+  }
+  return refreshCookieHeader(res);
 }
 
 export function expectStatus(res: request.Response, status: number, label: string): void {

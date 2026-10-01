@@ -185,23 +185,73 @@ export async function loginParent(
     throw unauthenticated(LOGIN_FAILED_MESSAGE);
   }
 
-  const matches = await prisma.parent.findMany({ where: { phone } });
+  const matches = await prisma.parent.findMany({
+    where: { phone },
+    include: { school: { select: { id: true, name: true } } },
+  });
   if (matches.length === 0) {
     await dummyVerify(input.pin, config.bcryptRounds);
     throw unauthenticated(LOGIN_FAILED_MESSAGE);
   }
-  if (matches.length > 1 && !input.schoolId) {
-    throw conflict("SCHOOL_SELECTION_REQUIRED", "This phone is registered at more than one school.", {
-      schools: matches.map((row) => ({ id: row.schoolId, phone: row.phone })),
-    });
+
+  if (input.schoolId) {
+    const parent = matches.find((row) => row.schoolId === input.schoolId);
+    if (!parent) {
+      await dummyVerify(input.pin, config.bcryptRounds);
+      throw unauthenticated(LOGIN_FAILED_MESSAGE);
+    }
+    return completeParentLogin(prisma, config, parent, input.pin, userAgent);
   }
-  const parent = input.schoolId ? matches.find((row) => row.schoolId === input.schoolId) : matches[0];
-  if (!parent) {
-    await dummyVerify(input.pin, config.bcryptRounds);
+
+  if (matches.length === 1) {
+    return completeParentLogin(prisma, config, matches[0]!, input.pin, userAgent);
+  }
+
+  // Multi-school: prove the PIN first. Never 409 before a correct PIN.
+  // A typo must not increment lockout on every school this phone belongs to;
+  // we only count failures against a row once the caller has named that school
+  // (the schoolId branch above) or when the phone maps to a single account.
+  const pinMatches: typeof matches = [];
+  for (const row of matches) {
+    if (await verifySecret(input.pin, row.pinHash)) {
+      pinMatches.push(row);
+    }
+  }
+  if (pinMatches.length === 0) {
     throw unauthenticated(LOGIN_FAILED_MESSAGE);
   }
+
+  const unlocked = pinMatches.filter((row) => !(row.lockedUntil && row.lockedUntil.getTime() > Date.now()));
+  if (unlocked.length === 0) {
+    throw tooMany("LOCKED_OUT", "Too many failed attempts. Try again later.");
+  }
+  if (unlocked.length === 1) {
+    return completeParentLogin(prisma, config, unlocked[0]!, input.pin, userAgent, true);
+  }
+
+  throw conflict("SCHOOL_SELECTION_REQUIRED", "This phone is registered at more than one school.", {
+    schools: unlocked.map((row) => ({ id: row.school.id, name: row.school.name })),
+  });
+}
+
+async function completeParentLogin(
+  prisma: PrismaClient,
+  config: AppConfig,
+  parent: {
+    id: string;
+    schoolId: string;
+    phone: string;
+    pinHash: string;
+    mustChangePin: boolean;
+    failedLoginAttempts: number;
+    lockedUntil: Date | null;
+  },
+  pin: string,
+  userAgent: string | undefined,
+  pinAlreadyVerified = false,
+): Promise<AuthSuccess> {
   assertNotLocked(parent.lockedUntil);
-  const ok = await verifySecret(input.pin, parent.pinHash);
+  const ok = pinAlreadyVerified ? true : await verifySecret(pin, parent.pinHash);
   if (!ok) {
     await failParentLogin(prisma, config, parent.id, parent.schoolId, parent.failedLoginAttempts);
   }

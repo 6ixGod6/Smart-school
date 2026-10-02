@@ -89,6 +89,24 @@ School
 ### Scale expectations
 Designed for ~50 schools × ~500 students (~25,000 students) as the near-term target. PostgreSQL handles this comfortably. Index `school_id` and `student_id` on every large table. Plan to partition `AttendanceRecord` and `GradeEntry` by school year once volume grows. Use PgBouncer before scaling past a handful of schools.
 
+### Prisma-invisible constraints — do not let `migrate dev` drop these
+
+Prisma can attach `schoolId` to only one relation per model. Tenant isolation and several academic-year rules therefore live in **hand-written SQL** that `schema.prisma` does not express. `prisma migrate dev` diffs the schema against a shadow database and will offer to `DROP CONSTRAINT` / `DROP INDEX` anything it cannot see. **If that is accepted, tenant isolation disappears while application tests can still pass.**
+
+**Every generated migration must be read for `DROP CONSTRAINT` / `DROP INDEX` before it is applied.** If a drop targets one of the names below, reject the migration and keep the SQL.
+
+The living assertion list is `PRISMA_INVISIBLE_CONSTRAINTS` in `apps/api/src/auth/schema.indexes.test.ts`. Adding a new raw-SQL constraint means adding it there too.
+
+Composite tenant foreign keys (`*_tenant_fkey`):
+`sections_grade_level_tenant_fkey`, `parent_student_links_parent_tenant_fkey`, `parent_student_links_student_tenant_fkey`, `grade_level_subjects_grade_level_tenant_fkey`, `grade_level_subjects_subject_tenant_fkey`, `subject_assignments_section_tenant_fkey`, `subject_assignments_teacher_tenant_fkey`, `subject_assignments_subject_tenant_fkey`, `subject_assignments_year_tenant_fkey`, `attendance_records_student_tenant_fkey`, `grade_entries_student_tenant_fkey`, `grade_entries_subject_tenant_fkey`, `grade_entries_period_tenant_fkey`, `grade_group_grade_levels_group_tenant_fkey`, `grade_group_grade_levels_level_tenant_fkey`, `audience_snapshot_members_audience_tenant_fkey`, `audience_snapshot_members_student_tenant_fkey`, `charge_batches_audience_tenant_fkey`, `charge_batches_creator_tenant_fkey`, `charge_batches_event_tenant_fkey`, `charge_batches_year_tenant_fkey`, `fee_charge_items_student_tenant_fkey`, `fee_charge_items_batch_tenant_fkey`, `fee_charge_items_event_tenant_fkey`, `events_audience_tenant_fkey`, `events_creator_tenant_fkey`, `event_participations_event_tenant_fkey`, `event_participations_student_tenant_fkey`, `event_participations_parent_tenant_fkey`, `payments_parent_tenant_fkey`, `payment_charge_items_payment_tenant_fkey`, `payment_charge_items_charge_tenant_fkey`, `receipts_payment_tenant_fkey`, `notifications_parent_tenant_fkey`, `notifications_student_tenant_fkey`, `push_subscriptions_parent_tenant_fkey`, `periods_year_tenant_fkey`, `enrollments_year_tenant_fkey`, `enrollments_student_tenant_fkey`, `enrollments_section_tenant_fkey`.
+
+Academic-year rules:
+- `academic_years_one_active_per_school` — partial unique index (`WHERE status = 'ACTIVE'`)
+- `academic_years_dates_no_overlap`, `periods_dates_no_overlap` — gist exclusion
+- `periods_summer_no_grade_tally`, `periods_summer_no_semester`, `academic_years_date_order` — CHECK
+
+`students_section_tenant_fkey` was dropped when placement moved to `Enrollment`; do not recreate it.
+
 ---
 
 ## 4. Student IDs and subjects

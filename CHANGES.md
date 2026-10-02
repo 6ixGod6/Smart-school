@@ -4,6 +4,55 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-02 — Teacher attendance year leak + Prisma-invisible constraint guard
+
+### What changed and why
+
+Fixes only. No promotion flow, no React admin UI.
+
+**Fix 1. Teacher student-attendance reads no longer leak across years.** `listStudentAttendance` resolved the year from `from` (or the ACTIVE year) and then queried `from`/`to` with no year bound, so `from=2026-09-10&to=2032-06-30` — or no `from` at all — returned later years the teacher never taught. A teacher request now resolves to exactly one `AcademicYear` (by that year's own dates, not a covering period). A range that overlaps two years is **400** ("Query one year at a time."). Returned rows are clamped to that year's start/end. Missing `from` defaults the window to the ACTIVE year's dates. `school_admin` / `super_admin` still get the requested (or full) history. Parents still get full history for linked children — the link is student-level, not year-level.
+
+**Fix 2. Prisma-invisible constraints are now asserted by name.** Tenant composite FKs, the one-ACTIVE-year partial unique index, gist exclusions, and academic-year CHECKs live in hand-written SQL. `prisma migrate dev` will offer to DROP them as drift. `schema.indexes.test.ts` enumerates every one in `PRISMA_INVISIBLE_CONSTRAINTS` and fails if any is missing or the wrong type. CLAUDE.md §3 now records this and requires every generated migration to be read for `DROP CONSTRAINT` / `DROP INDEX` before apply.
+
+**Fail-loud check (done locally):** dropped `academic_years_one_active_per_school` on `smart_school_test`, reran the test — it failed listing that name under `missing Prisma-invisible constraints`. Recreated the index; the test passed again.
+
+### Dependencies added
+
+None.
+
+### High-risk: authorization
+
+- Teacher attendance history is now year-scoped server-side. A wide `to` cannot pull another year's rows. This is still one school — not a tenant fix — but it is the assigned-section rule.
+- Parent and admin history paths were not narrowed.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api typecheck
+tsc --noEmit   (exit 0)
+
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  5 passed (5)
+      Tests  56 passed (56)
+   Start at  11:08:57
+   Duration  138.82s
+```
+
+Adversarial coverage added this step:
+
+- Teacher `from`/`to` spanning 2026/2027 and 2027/2028 → 400.
+- Teacher range inside the assigned year → only that year's rows.
+- Teacher with no `from` → only ACTIVE-year rows, not the later-year row.
+- Admin on the same spanning range → both years' rows.
+- Constraint inventory present; temporarily dropping the partial unique index made that test fail, then restore passed.
+
+Failures: none in the full run.
+
+---
+
 ## 2026-10-01 — Academic years and enrollments (schema + read paths)
 
 ### What changed and why

@@ -34,6 +34,52 @@ export async function requireActiveYear(prisma: PrismaClient, schoolId: string):
   return year;
 }
 
+export async function yearCoveringDate(
+  prisma: PrismaClient,
+  schoolId: string,
+  date: Date,
+): Promise<AcademicYearRow | null> {
+  return prisma.academicYear.findFirst({
+    where: { schoolId, startDate: { lte: date }, endDate: { gte: date } },
+  });
+}
+
+/** Teacher reads must resolve to one year and never return dates outside it. */
+export async function resolveTeacherAttendanceWindow(
+  prisma: PrismaClient,
+  schoolId: string,
+  requestedFrom?: Date,
+  requestedTo?: Date,
+): Promise<{ year: AcademicYearRow; from: Date; to: Date }> {
+  const year = requestedFrom
+    ? await yearCoveringDate(prisma, schoolId, requestedFrom)
+    : await requireActiveYear(prisma, schoolId);
+  if (!year) {
+    throw badRequest("from is not inside any academic year at this school.");
+  }
+
+  const from = requestedFrom ?? year.startDate;
+  const to = requestedTo ?? year.endDate;
+  if (to < from) {
+    throw badRequest("to must be on or after from.");
+  }
+
+  const spanning = await prisma.academicYear.count({
+    where: {
+      schoolId,
+      startDate: { lte: to },
+      endDate: { gte: from },
+    },
+  });
+  if (spanning > 1) {
+    throw badRequest("This date range spans more than one academic year. Query one year at a time.");
+  }
+
+  const clampedFrom = from < year.startDate ? year.startDate : from;
+  const clampedTo = to > year.endDate ? year.endDate : to;
+  return { year, from: clampedFrom, to: clampedTo };
+}
+
 export async function listAcademicYears(prisma: PrismaClient, schoolId: string): Promise<AcademicYearRow[]> {
   return prisma.academicYear.findMany({
     where: { schoolId },

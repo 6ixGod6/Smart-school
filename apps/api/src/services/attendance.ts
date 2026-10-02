@@ -8,7 +8,7 @@ import { periodCoveringDate, periodIsClosed } from "./periods.ts";
 import {
   assertTeacherAssignedToSectionInYear,
   enrollmentInYear,
-  requireActiveYear,
+  resolveTeacherAttendanceWindow,
   studentIdsInSectionForYear,
 } from "./years.ts";
 
@@ -170,8 +170,9 @@ export async function listStudentAttendance(
   const student = await prisma.student.findFirst({ where: { id: studentId, schoolId } });
   if (!student) throw notFound();
 
-  const from = fromStr ? parseDateOnly(fromStr, "from") : undefined;
-  const to = toStr ? parseDateOnly(toStr, "to") : undefined;
+  const requestedFrom = fromStr ? parseDateOnly(fromStr, "from") : undefined;
+  const requestedTo = toStr ? parseDateOnly(toStr, "to") : undefined;
+  let dateFilter: { gte?: Date; lte?: Date } | undefined;
 
   if (auth.role === "parent") {
     parentMaySeeStudent(auth, student.id, student.status);
@@ -179,21 +180,26 @@ export async function listStudentAttendance(
     if (!school?.attendanceVisibleToParents) {
       throw forbidden("Attendance is not visible to parents at this school.");
     }
-  } else if (auth.role === "teacher") {
-    let yearId: string;
-    if (from) {
-      const covering = await periodCoveringDate(prisma, schoolId, from);
-      if (!covering) {
-        throw badRequest("No academic period covers this date — create or extend the period first.");
-      }
-      yearId = covering.academicYearId;
-    } else {
-      yearId = (await requireActiveYear(prisma, schoolId)).id;
+    if (requestedFrom || requestedTo) {
+      dateFilter = {
+        ...(requestedFrom ? { gte: requestedFrom } : {}),
+        ...(requestedTo ? { lte: requestedTo } : {}),
+      };
     }
-    const enrollment = await enrollmentInYear(prisma, schoolId, student.id, yearId);
+  } else if (auth.role === "teacher") {
+    const window = await resolveTeacherAttendanceWindow(prisma, schoolId, requestedFrom, requestedTo);
+    const enrollment = await enrollmentInYear(prisma, schoolId, student.id, window.year.id);
     if (!enrollment) throw notFound();
-    await assertTeacherAssignedToSectionInYear(prisma, auth, schoolId, enrollment.sectionId, yearId);
-  } else if (auth.role !== "school_admin" && auth.role !== "super_admin") {
+    await assertTeacherAssignedToSectionInYear(prisma, auth, schoolId, enrollment.sectionId, window.year.id);
+    dateFilter = { gte: window.from, lte: window.to };
+  } else if (auth.role === "school_admin" || auth.role === "super_admin") {
+    if (requestedFrom || requestedTo) {
+      dateFilter = {
+        ...(requestedFrom ? { gte: requestedFrom } : {}),
+        ...(requestedTo ? { lte: requestedTo } : {}),
+      };
+    }
+  } else {
     throw forbidden();
   }
 
@@ -201,9 +207,7 @@ export async function listStudentAttendance(
     where: {
       schoolId,
       studentId,
-      ...(from || to
-        ? { date: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } }
-        : {}),
+      ...(dateFilter ? { date: dateFilter } : {}),
     },
     orderBy: { date: "asc" },
   });

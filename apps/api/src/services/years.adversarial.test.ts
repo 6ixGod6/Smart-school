@@ -266,4 +266,63 @@ describe("academic years and enrollments", () => {
       .set(bearer(teacherToken));
     expectStatus(other, 403, "teacher unassigned roster");
   });
+
+  it("rejects a teacher attendance range that spans two academic years and clamps a year-local read", async () => {
+    const yearOneDate = new Date("2026-09-15T00:00:00.000Z");
+    const yearTwoDate = new Date("2027-09-15T00:00:00.000Z");
+    await h.prisma.attendanceRecord.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentId: h.ids.studentAssigned,
+        date: yearOneDate,
+        status: "PRESENT",
+        recordedByStaffId: h.ids.teacherA,
+      },
+    });
+    await h.prisma.attendanceRecord.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentId: h.ids.studentAssigned,
+        date: yearTwoDate,
+        status: "ABSENT",
+        recordedByStaffId: h.ids.adminA,
+      },
+    });
+
+    const spanning = await request(h.app)
+      .get(
+        `/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/attendance?from=2026-09-10&to=2032-06-30`,
+      )
+      .set(bearer(teacherToken));
+    expectStatus(spanning, 400, "teacher spanning two years");
+    expect(spanning.body.error.message).toMatch(/one academic year/i);
+
+    const inYear = await request(h.app)
+      .get(
+        `/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/attendance?from=2026-08-01&to=2027-07-31`,
+      )
+      .set(bearer(teacherToken));
+    expectStatus(inYear, 200, "teacher assigned year range");
+    const inYearDates = (inYear.body.records as Array<{ date: string }>).map((row) => row.date.slice(0, 10));
+    expect(inYearDates).toContain("2026-09-15");
+    expect(inYearDates).not.toContain("2027-09-15");
+
+    const noFrom = await request(h.app)
+      .get(`/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/attendance`)
+      .set(bearer(teacherToken));
+    expectStatus(noFrom, 200, "teacher default active year");
+    const noFromDates = (noFrom.body.records as Array<{ date: string }>).map((row) => row.date.slice(0, 10));
+    expect(noFromDates).toContain("2026-09-15");
+    expect(noFromDates).not.toContain("2027-09-15");
+
+    const admin = await request(h.app)
+      .get(
+        `/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/attendance?from=2026-09-10&to=2032-06-30`,
+      )
+      .set(bearer(adminAToken));
+    expectStatus(admin, 200, "admin spanning two years");
+    const adminDates = (admin.body.records as Array<{ date: string }>).map((row) => row.date.slice(0, 10));
+    expect(adminDates).toContain("2026-09-15");
+    expect(adminDates).toContain("2027-09-15");
+  });
 });

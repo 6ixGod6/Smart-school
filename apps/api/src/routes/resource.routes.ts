@@ -7,7 +7,7 @@ import {
   parentMaySeeStudent,
   requireSchoolScope,
 } from "../middleware/tenancy.ts";
-import { enrollmentInYear, requireActiveYear } from "../services/years.ts";
+import { enrollmentInYear, parentVisibleEnrollment, requireActiveYear } from "../services/years.ts";
 
 /** Minimal school-scoped resources so authz can be tested against real rows. Not the product UI. */
 export function resourceRouter(_deps: AppDeps): Router {
@@ -63,6 +63,8 @@ export function resourceRouter(_deps: AppDeps): Router {
         throw forbidden();
       }
 
+      const parentEnrollment =
+        auth.role === "parent" ? await parentVisibleEnrollment(prisma, schoolId, enrollment) : null;
       res.json({
         student: {
           id: student.id,
@@ -71,6 +73,17 @@ export function resourceRouter(_deps: AppDeps): Router {
           sectionId: enrollment?.sectionId ?? null,
           name: student.name,
           status: student.status,
+          enrollment:
+            auth.role === "parent"
+              ? parentEnrollment
+              : enrollment
+                ? {
+                    id: enrollment.id,
+                    academicYearId: enrollment.academicYearId,
+                    sectionId: enrollment.sectionId,
+                    outcome: enrollment.outcome,
+                  }
+                : null,
         },
       });
     }),

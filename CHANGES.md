@@ -4,6 +4,74 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-02 — Academic year lifecycle and promotion (backend)
+
+### What changed and why
+
+Backend only. No React admin UI.
+
+**A. Year lifecycle.** `school_admin` / `super_admin` create a year (`POST /v1/schools/:schoolId/academic-years`) as `PLANNED` (label, start, end). A planned year is PATCH-able; parents never see the year list. Periods attach to it the same way as today (`academicYearId`). Activating (`POST .../academic-years/:yearId/activate`) moves that year `PLANNED → ACTIVE` and, in the same transaction, the current `ACTIVE` year to `CLOSED`. Both writes are audited (`ACADEMIC_YEAR_ACTIVATED`, `ACADEMIC_YEAR_CLOSED` / `ACADEMIC_YEAR_CLOSED_WITH_PENDING`).
+
+**Closing with PENDING enrollments** is rejected (`409 YEAR_HAS_PENDING`, e.g. "14 students in 2026/2027 still have no outcome.") unless the admin sends `override: true` and a non-empty reason. The override audit names the count and reason. PENDING rows stay PENDING and stay editable — close never writes an outcome. After close, attendance and period writes are 403; enrollment outcomes are not.
+
+**B. Promotion review.** `GET .../academic-years/:yearId/sections/:sectionId/promotion-review?targetYearId=` returns each student, `studentCode`, current enrollment/outcome, whether they already have a target-year enrollment, and `pendingInYear` (year-wide, so the outstanding list cannot vanish over the holidays). Admin-only.
+
+**C. Promotion execute.** `POST /v1/schools/:schoolId/promotions` takes source/target years, default and repeat target sections, and `{ studentId, outcome, targetSectionId? }`. In one transaction:
+
+- `PROMOTED` / `REPEATING` set the source outcome and create a `PENDING` enrollment in the target year (repeat section must be the same grade level).
+- `GRADUATED` / `WITHDRAWN` / `TRANSFERRED` set the outcome and update `Student.status` (`GRADUATED`, `WITHDRAWN`, `INACTIVE` for transferred — there is no `TRANSFERRED` student status). No new enrollment.
+- `PENDING` is a no-op (defer for summer).
+- `studentCode` is never rewritten.
+- Re-running a student who already has a target-year enrollment is **skipped**, not a 409 and not a second row. Only students in the request are touched. One invalid student fails the whole request with no writes. No section capacity check.
+
+Each outcome writes `ENROLLMENT_OUTCOME_SET` (who, when, student, old/new outcome, created enrollment id).
+
+**D.** Writes are `school_admin` / `super_admin` only. Parents see `enrollment.outcome` only when it is not `PENDING`; while pending, a year that has a `SUMMER` period is shown as `inSummerSession: true`. Teachers cannot review or execute promotion.
+
+### Dependencies added
+
+None.
+
+### High-risk: authorization / records
+
+- Outcome writes and year activate/close check role and `school_id` on the server. A teacher calling promote is 403.
+- Target sections are loaded by `schoolId`; a School B section is 404. Composite FKs still reject a cross-tenant enrollment if something bypasses the API.
+- Closing a year does not invent outcomes. A late summer result is a later promote call against the closed source year.
+- `TRANSFERRED` maps to `Student.status = INACTIVE` so the parent app hides the child (`status === ACTIVE` is the visibility filter). Flag if that mapping should be `WITHDRAWN` instead.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api typecheck
+tsc --noEmit   (exit 0)
+
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  6 passed (6)
+      Tests  67 passed (67)
+   Start at  11:45:16
+   Duration  21.39s
+```
+
+Adversarial coverage added this step:
+
+- Teacher create-year, promotion review, and promote → 403.
+- Close / activate while PENDING remain → 409 `YEAR_HAS_PENDING`.
+- Override without a reason → 400; override with a reason writes `ACADEMIC_YEAR_CLOSED_WITH_PENDING`.
+- PENDING outcome still settable after the year is closed (GRADUATED).
+- Second wave for an already-promoted student → skipped, no second enrollment.
+- Repeater: two enrollments, same grade, two years, unchanged `studentCode`.
+- Invalid student in the same batch → 400 and no new target-year rows; leftover PENDING unchanged.
+- Parent GET while PENDING → `outcome: null`, `inSummerSession: true`; after PROMOTED → `outcome: "PROMOTED"`.
+- Attendance / period write on a closed year → 403.
+- Promote into another school's section → 404.
+
+Failures: none in this run.
+
+---
+
 ## 2026-10-02 — Teacher attendance year leak + Prisma-invisible constraint guard
 
 ### What changed and why

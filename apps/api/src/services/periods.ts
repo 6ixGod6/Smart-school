@@ -1,7 +1,7 @@
 import type { PrismaClient } from "@smart-school/shared";
 import { badRequest, conflict, notFound } from "../http.ts";
 import { dateOnlyString, parseDateOnly } from "../dates.ts";
-import { requireActiveYear } from "./years.ts";
+import { assertYearAllowsAcademicWrites, requireActiveYear } from "./years.ts";
 
 type PeriodRow = {
   id: string;
@@ -87,8 +87,7 @@ export async function createPeriod(
   }
 
   const academicYearId = input.academicYearId ?? (await requireActiveYear(prisma, schoolId)).id;
-  const year = await prisma.academicYear.findFirst({ where: { id: academicYearId, schoolId } });
-  if (!year) throw notFound();
+  await assertYearAllowsAcademicWrites(prisma, schoolId, academicYearId);
 
   const startDate = parseDateOnly(input.startDate, "startDate");
   const endDate = parseDateOnly(input.endDate, "endDate");
@@ -139,6 +138,7 @@ export async function updatePeriod(
 ): Promise<PeriodRow> {
   const existing = await prisma.period.findFirst({ where: { id: periodId, schoolId } });
   if (!existing) throw notFound();
+  await assertYearAllowsAcademicWrites(prisma, schoolId, existing.academicYearId);
   const startDate = input.startDate ? parseDateOnly(input.startDate, "startDate") : existing.startDate;
   const endDate = input.endDate ? parseDateOnly(input.endDate, "endDate") : existing.endDate;
   if (endDate <= startDate) {

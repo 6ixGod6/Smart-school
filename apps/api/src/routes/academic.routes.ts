@@ -1,13 +1,20 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { AppDeps } from "../auth/principal.ts";
-import { asyncHandler } from "../http.ts";
+import { asyncHandler, badRequest } from "../http.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
 import { requireSchoolScope } from "../middleware/tenancy.ts";
 import { createPeriod, listPeriods, updatePeriod } from "../services/periods.ts";
+import { executePromotion, promotionReview } from "../services/promotion.ts";
 import { listSectionAttendance, listStudentAttendance, markSectionAttendance } from "../services/attendance.ts";
 import { getSchoolSettings, updateSchoolSettings } from "../services/settings.ts";
-import { listAcademicYears } from "../services/years.ts";
+import {
+  activateAcademicYear,
+  closeAcademicYear,
+  createAcademicYear,
+  listAcademicYears,
+  updateAcademicYear,
+} from "../services/years.ts";
 
 const periodCreateSchema = z.object({
   number: z.number().int().min(1).max(20),
@@ -34,6 +41,40 @@ const attendanceMarkSchema = z.object({
   reason: z.string().optional(),
 });
 
+const yearCreateSchema = z.object({
+  label: z.string().min(1),
+  startDate: z.string(),
+  endDate: z.string(),
+});
+
+const yearUpdateSchema = z.object({
+  label: z.string().min(1).optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
+});
+
+const yearCloseSchema = z.object({
+  override: z.boolean().optional(),
+  reason: z.string().optional(),
+});
+
+const promotionSchema = z.object({
+  sourceYearId: z.string().uuid(),
+  sourceSectionId: z.string().uuid(),
+  targetYearId: z.string().uuid(),
+  defaultTargetSectionId: z.string().uuid(),
+  repeatTargetSectionId: z.string().uuid(),
+  decisions: z
+    .array(
+      z.object({
+        studentId: z.string().uuid(),
+        outcome: z.enum(["PENDING", "PROMOTED", "REPEATING", "GRADUATED", "WITHDRAWN", "TRANSFERRED"]),
+        targetSectionId: z.string().uuid().optional(),
+      }),
+    )
+    .min(1),
+});
+
 const settingsSchema = z.object({
   gradeCadence: z.string().optional(),
   publishTiming: z.string().optional(),
@@ -54,6 +95,109 @@ export function academicRouter(_deps: AppDeps): Router {
       const { prisma } = req.app.locals.deps as AppDeps;
       const years = await listAcademicYears(prisma, String(req.params.schoolId));
       res.json({ academicYears: years });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/academic-years",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = yearCreateSchema.parse(req.body);
+      const year = await createAcademicYear(prisma, req.auth!, String(req.params.schoolId), body);
+      res.status(201).json({ academicYear: year });
+    }),
+  );
+
+  router.patch(
+    "/schools/:schoolId/academic-years/:yearId",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = yearUpdateSchema.parse(req.body);
+      const year = await updateAcademicYear(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.yearId),
+        body,
+      );
+      res.json({ academicYear: year });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/academic-years/:yearId/activate",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = yearCloseSchema.parse(req.body ?? {});
+      const result = await activateAcademicYear(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.yearId),
+        body,
+      );
+      res.json(result);
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/academic-years/:yearId/close",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = yearCloseSchema.parse(req.body ?? {});
+      const year = await closeAcademicYear(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.yearId),
+        body,
+      );
+      res.json({ academicYear: year });
+    }),
+  );
+
+  router.get(
+    "/schools/:schoolId/academic-years/:yearId/sections/:sectionId/promotion-review",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const targetYearId = typeof req.query.targetYearId === "string" ? req.query.targetYearId : "";
+      if (!targetYearId) throw badRequest("targetYearId query parameter is required.");
+      const review = await promotionReview(
+        prisma,
+        String(req.params.schoolId),
+        String(req.params.yearId),
+        String(req.params.sectionId),
+        targetYearId,
+      );
+      res.json(review);
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/promotions",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = promotionSchema.parse(req.body);
+      const result = await executePromotion(prisma, req.auth!, String(req.params.schoolId), body);
+      res.json(result);
     }),
   );
 

@@ -7,6 +7,7 @@ import { parentMaySeeStudent } from "../middleware/tenancy.ts";
 import { periodCoveringDate, periodIsClosed } from "./periods.ts";
 import {
   assertTeacherAssignedToSectionInYear,
+  assertYearAllowsAcademicWrites,
   enrollmentInYear,
   resolveTeacherAttendanceWindow,
   studentIdsInSectionForYear,
@@ -46,6 +47,7 @@ export async function markSectionAttendance(
   if (!covering) {
     throw badRequest("No academic period covers this date — create or extend the period first.");
   }
+  await assertYearAllowsAcademicWrites(prisma, schoolId, covering.academicYearId);
   await assertTeacherAssignedToSectionInYear(prisma, auth, schoolId, sectionId, covering.academicYearId);
   const closed = periodIsClosed(covering.endDate);
   const reason = input.reason?.trim() ?? "";

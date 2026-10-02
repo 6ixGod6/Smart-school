@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
+import { countOnRollEnrollments } from "./roll.ts";
 import {
   PASSWORD_A,
   PASSWORD_TEACHER,
@@ -275,6 +276,178 @@ describe("year lifecycle and promotion", () => {
       where: { studentId: h.ids.studentWithdrawn, academicYearId: h.ids.yearA },
     });
     expect(withdrawn.outcome).toBe("PENDING");
+  });
+
+  it("sets TRANSFERRED students to WITHDRAWN and keeps INACTIVE on the roll", async () => {
+    const transferred = await h.prisma.student.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentCode: "RIC-26-0200",
+        name: "Leaving Student",
+        status: "ACTIVE",
+      },
+    });
+    const inactive = await h.prisma.student.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentCode: "RIC-26-0201",
+        name: "Medical Leave",
+        status: "INACTIVE",
+      },
+    });
+    await h.prisma.enrollment.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentId: transferred.id,
+        academicYearId: h.ids.yearA,
+        sectionId: h.ids.sectionAssigned,
+        outcome: "PENDING",
+      },
+    });
+    await h.prisma.enrollment.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentId: inactive.id,
+        academicYearId: h.ids.yearA,
+        sectionId: h.ids.sectionAssigned,
+        outcome: "PENDING",
+      },
+    });
+
+    const before = await countOnRollEnrollments(h.prisma, h.ids.schoolA, h.ids.yearA);
+    const res = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/promotions`)
+      .set(bearer(adminAToken))
+      .send({
+        sourceYearId: h.ids.yearA,
+        sourceSectionId: h.ids.sectionAssigned,
+        targetYearId: yearNextId,
+        defaultTargetSectionId: nextSectionId,
+        repeatTargetSectionId: h.ids.sectionOther,
+        decisions: [{ studentId: transferred.id, outcome: "TRANSFERRED" }],
+      });
+    expectStatus(res, 200, "transfer outcome");
+    expect(res.body.applied).toEqual([
+      { studentId: transferred.id, outcome: "TRANSFERRED", createdEnrollmentId: null },
+    ]);
+
+    const left = await h.prisma.student.findUniqueOrThrow({ where: { id: transferred.id } });
+    expect(left.status).toBe("WITHDRAWN");
+    const stillHere = await h.prisma.student.findUniqueOrThrow({ where: { id: inactive.id } });
+    expect(stillHere.status).toBe("INACTIVE");
+
+    const after = await countOnRollEnrollments(h.prisma, h.ids.schoolA, h.ids.yearA);
+    expect(after).toBe(before - 1);
+
+    const onRoll = await h.prisma.enrollment.findMany({
+      where: {
+        schoolId: h.ids.schoolA,
+        academicYearId: h.ids.yearA,
+        student: { status: { in: ["ACTIVE", "INACTIVE"] } },
+      },
+      select: { student: { select: { status: true } } },
+    });
+    expect(onRoll.every((row) => row.student.status === "ACTIVE" || row.student.status === "INACTIVE")).toBe(
+      true,
+    );
+    expect(onRoll.some((row) => row.student.status === "INACTIVE")).toBe(true);
+  });
+
+  it("reports a raced student as concurrent_modification and still commits the rest", async () => {
+    const raced = await h.prisma.student.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentCode: "RIC-26-0300",
+        name: "Raced Student",
+        status: "ACTIVE",
+      },
+    });
+    const sibling = await h.prisma.student.create({
+      data: {
+        schoolId: h.ids.schoolA,
+        studentCode: "RIC-26-0301",
+        name: "Sibling Student",
+        status: "ACTIVE",
+      },
+    });
+    await h.prisma.enrollment.createMany({
+      data: [
+        {
+          schoolId: h.ids.schoolA,
+          studentId: raced.id,
+          academicYearId: h.ids.yearA,
+          sectionId: h.ids.sectionAssigned,
+          outcome: "PENDING",
+        },
+        {
+          schoolId: h.ids.schoolA,
+          studentId: sibling.id,
+          academicYearId: h.ids.yearA,
+          sectionId: h.ids.sectionAssigned,
+          outcome: "PENDING",
+        },
+      ],
+    });
+
+    await h.prisma.$executeRawUnsafe(`
+      CREATE OR REPLACE FUNCTION test_inject_enrollment_unique() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.student_id = '${raced.id}'::uuid THEN
+          RAISE EXCEPTION 'duplicate key value violates unique constraint "enrollments_student_id_academic_year_id_key"'
+            USING ERRCODE = '23505';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await h.prisma.$executeRawUnsafe(`
+      DROP TRIGGER IF EXISTS test_inject_enrollment_unique ON enrollments;
+      CREATE TRIGGER test_inject_enrollment_unique
+        BEFORE INSERT ON enrollments
+        FOR EACH ROW
+        EXECUTE PROCEDURE test_inject_enrollment_unique();
+    `);
+
+    try {
+      const res = await request(h.app)
+        .post(`/v1/schools/${h.ids.schoolA}/promotions`)
+        .set(bearer(adminAToken))
+        .send({
+          sourceYearId: h.ids.yearA,
+          sourceSectionId: h.ids.sectionAssigned,
+          targetYearId: yearNextId,
+          defaultTargetSectionId: nextSectionId,
+          repeatTargetSectionId: h.ids.sectionOther,
+          decisions: [
+            { studentId: raced.id, outcome: "PROMOTED" },
+            { studentId: sibling.id, outcome: "PROMOTED" },
+          ],
+        });
+      expectStatus(res, 200, "promotion with raced student");
+      expect(res.body.skipped).toEqual([{ studentId: raced.id, reason: "concurrent_modification" }]);
+      expect(res.body.skipped[0].reason).not.toBe("already_enrolled_in_target_year");
+      expect(res.body.applied).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ studentId: sibling.id, outcome: "PROMOTED" }),
+        ]),
+      );
+
+      const racedSource = await h.prisma.enrollment.findFirstOrThrow({
+        where: { studentId: raced.id, academicYearId: h.ids.yearA },
+      });
+      expect(racedSource.outcome).toBe("PENDING");
+      const racedTarget = await h.prisma.enrollment.findFirst({
+        where: { studentId: raced.id, academicYearId: yearNextId },
+      });
+      expect(racedTarget).toBeNull();
+      const siblingTarget = await h.prisma.enrollment.findFirstOrThrow({
+        where: { studentId: sibling.id, academicYearId: yearNextId },
+      });
+      expect(siblingTarget.sectionId).toBe(nextSectionId);
+    } finally {
+      await h.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_inject_enrollment_unique ON enrollments;`);
+      await h.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_inject_enrollment_unique();`);
+    }
   });
 
   it("rejects a close override without a reason, then closes with a reason and keeps PENDING editable", async () => {

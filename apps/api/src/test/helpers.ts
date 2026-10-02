@@ -40,6 +40,7 @@ export type Harness = {
     parentUniqueB: string;
     yearA: string;
     yearB: string;
+    gradeLevelA: string;
   };
 };
 
@@ -126,6 +127,9 @@ export async function createHarness(): Promise<Harness> {
   });
   const subjectLit = await prisma.subject.create({
     data: { schoolId: schoolA.id, name: "Literature", nameNormalized: "literature", displayOrder: 1 },
+  });
+  await prisma.gradeLevelSubject.create({
+    data: { schoolId: schoolA.id, gradeLevelId: gradeA.id, subjectId: subjectLit.id },
   });
 
   const adminA = await prisma.staffUser.create({
@@ -319,6 +323,7 @@ export async function createHarness(): Promise<Harness> {
       parentUniqueB: parentUniqueB.id,
       yearA: yearA.id,
       yearB: yearB.id,
+      gradeLevelA: gradeA.id,
     },
   };
 }

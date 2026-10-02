@@ -567,10 +567,13 @@ model GradeEntry {
   subjectId      String          @map("subject_id") @db.Uuid
   periodId       String          @map("period_id") @db.Uuid
   assessmentType AssessmentType  @map("assessment_type")
+  /// Distinguishes two quizzes in the same period (1 and 2).
+  sequence       Int             @default(1)
   score          Decimal         @db.Decimal(6, 2)
   state          GradeEntryState @default(DRAFT)
   version        Int             @default(1)
   underReview    Boolean         @default(false) @map("under_review")
+  publishedAt    DateTime?       @map("published_at") @db.Timestamptz
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -578,6 +581,7 @@ model GradeEntry {
   subject Subject @relation(fields: [subjectId], references: [id], onDelete: Restrict)
   period  Period  @relation(fields: [periodId], references: [id], onDelete: Restrict)
 
+  @@unique([studentId, subjectId, periodId, assessmentType, sequence, version])
   @@index([schoolId])
   @@index([studentId])
   @@index([periodId])

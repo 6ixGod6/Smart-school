@@ -4,6 +4,16 @@ import type { AppDeps } from "../auth/principal.ts";
 import { asyncHandler, badRequest } from "../http.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
 import { requireSchoolScope } from "../middleware/tenancy.ts";
+import {
+  approveGrade,
+  correctPublishedGrade,
+  listStudentGrades,
+  missingSubmissions,
+  publishGradeCohort,
+  setGradeUnderReview,
+  submitGrade,
+  upsertDraftGrade,
+} from "../services/grades.ts";
 import { createPeriod, listPeriods, updatePeriod } from "../services/periods.ts";
 import { executePromotion, promotionReview } from "../services/promotion.ts";
 import { listSectionAttendance, listStudentAttendance, markSectionAttendance } from "../services/attendance.ts";
@@ -73,6 +83,38 @@ const promotionSchema = z.object({
       }),
     )
     .min(1),
+});
+
+const gradeUpsertSchema = z.object({
+  studentId: z.string().uuid(),
+  subjectId: z.string().uuid(),
+  periodId: z.string().uuid(),
+  assessmentType: z.enum(["QUIZ", "TEST", "HOMEWORK", "EXAM"]),
+  sequence: z.number().int().optional(),
+  score: z.number(),
+  reason: z.string().optional(),
+});
+
+const gradeReasonSchema = z.object({
+  reason: z.string().optional(),
+});
+
+const gradePublishSchema = z
+  .object({
+    periodId: z.string().uuid(),
+    sectionId: z.string().uuid().optional(),
+    gradeLevelId: z.string().uuid().optional(),
+    studentIds: z.unknown().optional(),
+  })
+  .passthrough();
+
+const gradeReviewSchema = z.object({
+  underReview: z.boolean(),
+});
+
+const gradeCorrectSchema = z.object({
+  score: z.number(),
+  reason: z.string(),
 });
 
 const settingsSchema = z.object({
@@ -297,6 +339,135 @@ export function academicRouter(_deps: AppDeps): Router {
         date,
       );
       res.json({ records });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/grades",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin", "teacher"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = gradeUpsertSchema.parse(req.body);
+      const grade = await upsertDraftGrade(prisma, req.auth!, String(req.params.schoolId), body);
+      res.status(201).json({ grade });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/grades/:gradeId/submit",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin", "teacher"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = gradeReasonSchema.parse(req.body ?? {});
+      const grade = await submitGrade(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.gradeId),
+        body.reason,
+      );
+      res.json({ grade });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/grades/:gradeId/approve",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const grade = await approveGrade(prisma, req.auth!, String(req.params.schoolId), String(req.params.gradeId));
+      res.json({ grade });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/grades/publish",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = gradePublishSchema.parse(req.body);
+      const result = await publishGradeCohort(prisma, req.auth!, String(req.params.schoolId), body);
+      res.json(result);
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/grades/:gradeId/under-review",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = gradeReviewSchema.parse(req.body);
+      const grade = await setGradeUnderReview(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.gradeId),
+        body.underReview,
+      );
+      res.json({ grade });
+    }),
+  );
+
+  router.post(
+    "/schools/:schoolId/grades/:gradeId/correct",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const body = gradeCorrectSchema.parse(req.body);
+      const grade = await correctPublishedGrade(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.gradeId),
+        body,
+      );
+      res.json({ grade });
+    }),
+  );
+
+  router.get(
+    "/schools/:schoolId/periods/:periodId/missing-submissions",
+    requireAuth,
+    requireSchoolScope,
+    requireRole("school_admin", "super_admin"),
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const missing = await missingSubmissions(
+        prisma,
+        String(req.params.schoolId),
+        String(req.params.periodId),
+      );
+      res.json({ missing });
+    }),
+  );
+
+  router.get(
+    "/schools/:schoolId/students/:studentId/grades",
+    requireAuth,
+    requireSchoolScope,
+    asyncHandler(async (req, res) => {
+      const { prisma } = req.app.locals.deps as AppDeps;
+      const periodId = typeof req.query.periodId === "string" ? req.query.periodId : undefined;
+      const grades = await listStudentGrades(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.studentId),
+        periodId,
+      );
+      res.json({ grades });
     }),
   );
 

@@ -4,6 +4,88 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-02 — Grade entry, deadline lock, publish gate + two promotion fixes (backend)
+
+### What changed and why
+
+Backend only. No React admin UI. No report-card compilation (that is §14 step 4).
+
+**A1. TRANSFERRED is off-roll.** A `TRANSFERRED` enrollment outcome now sets `Student.status = WITHDRAWN`, not `INACTIVE`. Both WITHDRAWN and TRANSFERRED mean the student left this school; the reason stays on the enrollment outcome. `INACTIVE` is reserved for someone still on the roll (medical leave, suspension) who is expected back. Parent visibility follows the same line: ACTIVE and INACTIVE are visible; WITHDRAWN and GRADUATED are 404.
+
+`countOnRollEnrollments` (`apps/api/src/services/roll.ts`) is the billing-safe count: it includes ACTIVE and INACTIVE and excludes WITHDRAWN / GRADUATED (and therefore transferred students). There is no other student-count query that assumed "ACTIVE only" or treated transferred as on-roll.
+
+**A2. Promotion unique violations use SAVEPOINTs.** Catching Prisma `P2002` inside a transaction does not recover on PostgreSQL — the transaction is already aborted. Each per-student write now runs under `SAVEPOINT sp_<loopIndex>` (name from the index only, never a student id). On unique violation: `ROLLBACK TO SAVEPOINT` and skip with `concurrent_modification`. On success: `RELEASE SAVEPOINT`. The ordinary re-run path is unchanged: a student already in the target year at snapshot time is `already_enrolled_in_target_year`. Those two reasons stay distinct. The rest of the batch still commits.
+
+**B. Grade entry (§14 step 3).** Teacher/admin `POST /v1/schools/:schoolId/grades` writes a DRAFT for student + subject + period + `QUIZ|TEST|HOMEWORK|EXAM` (+ `sequence` 1 or 2 for two quizzes). Server checks: year-scoped `SubjectAssignment` for that period's year, `GradeLevelSubject` mapping, and an enrollment in that year.
+
+State machine: teachers `POST .../grades/:id/submit` (Draft → Submitted). Admins `POST .../approve` (Submitted → Approved) and `POST .../grades/publish` (Approved → Published). Every transition is audited. Parents only ever see Published, and only after the school's grace window.
+
+Cadence is the school setting: `CONTINUOUS` publishes throughout the period; `END_OF_PERIOD` rejects publish until `period.endDate` has passed.
+
+Deadline lock: after `gradeEntryDeadline`, teachers get 403 on create/submit. A school_admin may still write with a non-empty `reason`, audited as `GRADE_DEADLINE_AMENDED`.
+
+Missing submissions: `GET .../periods/:periodId/missing-submissions` (admin only) computes from current `SubjectAssignment` rows — no stored flag.
+
+Publish is cohort-only: `(period + section)` or `(period + grade level)`. A body that includes `studentIds` / `students` / `studentId` is 400. Releasing one child while withholding a classmate is not allowed.
+
+`publishTiming IMMEDIATE` makes an approved cohort parent-visible at publish. `GRACE_WINDOW` waits `publishGraceHours`. An admin can flag `under_review`; the parent sees the label and no score. Correcting a published score creates a new DRAFT version, keeps the old row, and records `notifyParent: true` on `GRADE_CORRECTED` (the notification channel itself is step 9).
+
+Parent `GET .../students/:studentId/grades` returns Published + grace-elapsed rows for linked ACTIVE/INACTIVE children. SUMMER grades have `countsTowardTally: false`.
+
+### Dependencies added
+
+None.
+
+### High-risk: authorization / grade publishing / records
+
+- Grade writes check role and `school_id` on the server. A teacher may only write a (section, subject) they are assigned to **in that period's academic year**.
+- Approve and publish are `school_admin` / `super_admin` only. A teacher calling either is 403.
+- Publish refuses a student list so one child's result cannot leak another child's by omission.
+- Cross-school grade writes are 403 (path) or 404 (foreign student id).
+- A published correction never overwrites the old score; the previous value is on the retained row and in the audit metadata.
+- Promotion races no longer abort the transaction; a raced student is reported, not silently skipped as a benign re-run.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api typecheck
+tsc --noEmit   (exit 0)
+
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  7 passed (7)
+      Tests  88 passed (88)
+   Start at  11:41:01
+   Duration  12.85s
+```
+
+Adversarial coverage added this step:
+
+- Teacher grade for an unassigned subject or section → 403.
+- Teacher grade in a year they are not assigned to → 403.
+- Student not enrolled in the period's year → 400.
+- Teacher create or submit after `gradeEntryDeadline` → 403.
+- Admin amend past the deadline without a reason → 400; with a reason → audited.
+- Teacher approve or publish → 403.
+- Parent cannot see Draft, Submitted, or Approved grades.
+- Publish body carrying `studentIds` → 400.
+- Approved cohort is not parent-visible until the grace window elapses.
+- Parent sees no score for an `under_review` grade (label only).
+- Correcting a published score creates a new version; old score retained; `notifyParent: true`.
+- Cross-school grade write → 403 / 404.
+- Summer grade `countsTowardTally: false`.
+- Missing-submissions computed from assignments; teacher cannot read that endpoint.
+- `END_OF_PERIOD` publish before the period ends → 400; after → 200.
+- Parent can read an INACTIVE child and gets 404 for WITHDRAWN.
+- `TRANSFERRED` sets `Student.status = WITHDRAWN`; INACTIVE stays on-roll / billable.
+- Raced promotion student → `concurrent_modification`; sibling still committed. Distinct from `already_enrolled_in_target_year`.
+
+Failures: none in this run.
+
+---
+
 ## 2026-10-02 — Academic year lifecycle and promotion (backend)
 
 ### What changed and why

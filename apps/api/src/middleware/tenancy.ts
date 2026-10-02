@@ -46,7 +46,7 @@ export function assertTeacherAssignedToSubject(auth: AuthPrincipal, subjectId: s
 
 /** Parents must not learn that a student exists at another family or a withdrawn child is still on file. */
 export function parentMaySeeStudent(auth: AuthPrincipal, studentId: string, status: string): void {
-  if (!auth.studentIds.includes(studentId) || status !== "ACTIVE") {
+  if (!auth.studentIds.includes(studentId) || (status !== "ACTIVE" && status !== "INACTIVE")) {
     throw notFound();
   }
 }

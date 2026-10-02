@@ -133,6 +133,27 @@ export async function assertTeacherAssignedToSectionInYear(
   }
 }
 
+export async function assertTeacherAssignedToSubjectInYear(
+  prisma: PrismaClient,
+  auth: AuthPrincipal,
+  schoolId: string,
+  sectionId: string,
+  subjectId: string,
+  academicYearId: string,
+): Promise<void> {
+  if (auth.role === "school_admin" || auth.role === "super_admin") return;
+  if (auth.role !== "teacher" || auth.kind !== "staff") {
+    throw forbidden("Insufficient role for this action.");
+  }
+  const hit = await prisma.subjectAssignment.findFirst({
+    where: { schoolId, sectionId, subjectId, academicYearId, teacherId: auth.id },
+    select: { id: true },
+  });
+  if (!hit) {
+    throw forbidden("You are not assigned to this subject in this section.");
+  }
+}
+
 function errorCodes(err: unknown): string[] {
   const codes: string[] = [];
   let current: unknown = err;

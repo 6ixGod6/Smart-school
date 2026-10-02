@@ -27,11 +27,34 @@ function parseOutcome(value: string): Outcome {
   return value as Outcome;
 }
 
-function studentStatusFor(outcome: Outcome): "GRADUATED" | "WITHDRAWN" | "INACTIVE" | null {
+function studentStatusFor(outcome: Outcome): "GRADUATED" | "WITHDRAWN" | null {
   if (outcome === "GRADUATED") return "GRADUATED";
-  if (outcome === "WITHDRAWN") return "WITHDRAWN";
-  if (outcome === "TRANSFERRED") return "INACTIVE";
+  if (outcome === "WITHDRAWN" || outcome === "TRANSFERRED") return "WITHDRAWN";
   return null;
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  let current: unknown = err;
+  for (let i = 0; i < 6 && current; i += 1) {
+    if (typeof current === "object" && current && "code" in current) {
+      const code = String((current as { code: unknown }).code);
+      if (code === "P2002" || code === "23505") return true;
+    }
+    if (current instanceof Error && /\b23505\b/.test(current.message)) return true;
+    current =
+      typeof current === "object" && current && "cause" in current
+        ? (current as { cause: unknown }).cause
+        : undefined;
+  }
+  return false;
+}
+
+/** Savepoint name from the loop index only — never from a user-supplied id. */
+function savepointName(index: number): string {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error("savepoint index must be a non-negative integer");
+  }
+  return `sp_${index}`;
 }
 
 type PromotionReview = {
@@ -192,19 +215,21 @@ export async function executePromotion(
       const applied: PromotionResult["applied"] = [];
       const skipped: PromotionResult["skipped"] = [];
       const deferred: PromotionResult["deferred"] = [];
+      const knownTargets = await tx.enrollment.findMany({
+        where: { schoolId, academicYearId: targetYear.id, studentId: { in: studentIds } },
+        select: { studentId: true },
+      });
+      const alreadyInTarget = new Set(knownTargets.map((row) => row.studentId));
 
-      for (const row of decisions) {
+      for (let i = 0; i < decisions.length; i += 1) {
+        const row = decisions[i]!;
         if (row.outcome === "PENDING") {
           deferred.push({ studentId: row.studentId });
           continue;
         }
 
         const source = sourceByStudent.get(row.studentId)!;
-        const existingTarget = await tx.enrollment.findFirst({
-          where: { schoolId, studentId: row.studentId, academicYearId: targetYear.id },
-          select: { id: true },
-        });
-        if (existingTarget) {
+        if (alreadyInTarget.has(row.studentId)) {
           skipped.push({ studentId: row.studentId, reason: "already_enrolled_in_target_year" });
           continue;
         }
@@ -213,12 +238,14 @@ export async function executePromotion(
           continue;
         }
 
-        let createdEnrollmentId: string | null = null;
-        if (row.outcome === "PROMOTED" || row.outcome === "REPEATING") {
-          const sectionId =
-            row.targetSectionId ??
-            (row.outcome === "REPEATING" ? repeatTarget.id : defaultTarget.id);
-          try {
+        const sp = savepointName(i);
+        await tx.$executeRawUnsafe(`SAVEPOINT ${sp}`);
+        try {
+          let createdEnrollmentId: string | null = null;
+          if (row.outcome === "PROMOTED" || row.outcome === "REPEATING") {
+            const sectionId =
+              row.targetSectionId ??
+              (row.outcome === "REPEATING" ? repeatTarget.id : defaultTarget.id);
             const created = await tx.enrollment.create({
               data: {
                 schoolId,
@@ -229,51 +256,53 @@ export async function executePromotion(
               },
             });
             createdEnrollmentId = created.id;
-          } catch (err) {
-            const code = typeof err === "object" && err && "code" in err ? String((err as { code: string }).code) : "";
-            if (code === "P2002") {
-              skipped.push({ studentId: row.studentId, reason: "already_enrolled_in_target_year" });
-              continue;
-            }
-            throw err;
+            alreadyInTarget.add(row.studentId);
           }
-        }
 
-        await tx.enrollment.update({
-          where: { id: source.id },
-          data: {
-            outcome: row.outcome,
-            outcomeSetAt: new Date(),
-            outcomeSetByStaffId: auth.id,
-          },
-        });
-
-        const nextStatus = studentStatusFor(row.outcome);
-        if (nextStatus) {
-          await tx.student.update({
-            where: { id: row.studentId },
-            data: { status: nextStatus },
+          await tx.enrollment.update({
+            where: { id: source.id },
+            data: {
+              outcome: row.outcome,
+              outcomeSetAt: new Date(),
+              outcomeSetByStaffId: auth.id,
+            },
           });
+
+          const nextStatus = studentStatusFor(row.outcome);
+          if (nextStatus) {
+            await tx.student.update({
+              where: { id: row.studentId },
+              data: { status: nextStatus },
+            });
+          }
+
+          await writeAudit(tx, {
+            schoolId,
+            actorStaffId: auth.id,
+            action: "ENROLLMENT_OUTCOME_SET",
+            entityType: "enrollment",
+            entityId: source.id,
+            metadata: {
+              studentId: row.studentId,
+              studentCode: source.student.studentCode,
+              oldOutcome: source.outcome,
+              newOutcome: row.outcome,
+              createdEnrollmentId,
+              sourceYearId: sourceYear.id,
+              targetYearId: targetYear.id,
+            },
+          });
+
+          await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${sp}`);
+          applied.push({ studentId: row.studentId, outcome: row.outcome, createdEnrollmentId });
+        } catch (err) {
+          if (isUniqueViolation(err)) {
+            await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${sp}`);
+            skipped.push({ studentId: row.studentId, reason: "concurrent_modification" });
+            continue;
+          }
+          throw err;
         }
-
-        await writeAudit(tx, {
-          schoolId,
-          actorStaffId: auth.id,
-          action: "ENROLLMENT_OUTCOME_SET",
-          entityType: "enrollment",
-          entityId: source.id,
-          metadata: {
-            studentId: row.studentId,
-            studentCode: source.student.studentCode,
-            oldOutcome: source.outcome,
-            newOutcome: row.outcome,
-            createdEnrollmentId,
-            sourceYearId: sourceYear.id,
-            targetYearId: targetYear.id,
-          },
-        });
-
-        applied.push({ studentId: row.studentId, outcome: row.outcome, createdEnrollmentId });
       }
 
       return { applied, skipped, deferred };

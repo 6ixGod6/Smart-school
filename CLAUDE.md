@@ -103,7 +103,7 @@ Composite tenant foreign keys (`*_tenant_fkey`):
 Academic-year rules:
 - `academic_years_one_active_per_school` — partial unique index (`WHERE status = 'ACTIVE'`)
 - `academic_years_dates_no_overlap`, `periods_dates_no_overlap` — gist exclusion
-- `periods_summer_no_grade_tally`, `periods_summer_no_semester`, `academic_years_date_order` — CHECK
+- `periods_summer_no_grade_tally`, `periods_summer_no_semester`, `academic_years_date_order`, `grade_entries_sequence_positive` — CHECK
 
 `students_section_tenant_fkey` was dropped when placement moved to `Enrollment`; do not recreate it.
 
@@ -160,7 +160,7 @@ The admin session — viewing school earnings, publishing grades, creating/manag
 - **Period/semester structure:** periods 1–6; periods 1–3 = first semester, 4–6 = second semester. Example deadline flow: period ends Sept 30 → teacher grade-entry deadline Oct 2 → parent-visible by Oct 3 (subject to the publish-timing setting above). Semester report auto-compiles once all 3 periods in that semester are published.
 - **Missing submissions:** if a teacher hasn't submitted grades by the deadline, flag it to the admin — never silently leave it blank.
 - **New school year rollover:** admin runs a bulk "Promote Section" action (e.g. 3rd Grade A → 4th Grade A). Any student not included is auto-flagged "not promoted / not re-enrolled" for manual admin follow-up.
-- **Student lifecycle:** use a `status` enum (`Active`/`Withdrawn`/`Graduated`/`Inactive`), never hard-delete. Withdrawing a student instantly hides them from the parent app (filter on `status = Active`) while preserving their full history for the school's own records.
+- **Student lifecycle:** use a `status` enum (`Active`/`Withdrawn`/`Graduated`/`Inactive`), never hard-delete. `Withdrawn` (including a `TRANSFERRED` enrollment outcome) and `Graduated` hide the child from the parent app and from on-roll / billable counts. `Inactive` is a student still on the roll (medical leave, suspension) — they stay visible to the linked parent and still count toward the $15/year platform fee. Filter parent visibility on `status in (Active, Inactive)`.
 
 ---
 

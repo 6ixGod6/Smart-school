@@ -30,6 +30,8 @@ type GradeRow = {
   version: number;
   underReview: boolean;
   publishedAt: Date | null;
+  supersededAt: Date | null;
+  supersededByGradeId: string | null;
   createdAt: Date;
   updatedAt: Date;
   countsTowardTally: boolean;
@@ -69,6 +71,8 @@ function asGradeRow(
     version: number;
     underReview: boolean;
     publishedAt: Date | null;
+    supersededAt: Date | null;
+    supersededByGradeId: string | null;
     createdAt: Date;
     updatedAt: Date;
   },
@@ -87,6 +91,8 @@ function asGradeRow(
     version: row.version,
     underReview: row.underReview,
     publishedAt: row.publishedAt,
+    supersededAt: row.supersededAt,
+    supersededByGradeId: row.supersededByGradeId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     countsTowardTally,
@@ -152,15 +158,49 @@ async function assertStudentMayReceiveGrade(
   return { sectionId: section.id, gradeLevelId: section.gradeLevelId };
 }
 
+/** Parent-visible rows: current published version only. Use this in every parent query. */
+export function parentVisibleGradeWhere(): { state: "PUBLISHED"; supersededAt: null } {
+  return { state: "PUBLISHED", supersededAt: null };
+}
+
 function parentMaySeePublished(
-  row: { state: GradeState; publishedAt: Date | null },
+  row: { state: GradeState; publishedAt: Date | null; supersededAt: Date | null },
   graceHours: number,
   timing: "IMMEDIATE" | "GRACE_WINDOW",
   now = new Date(),
 ): boolean {
+  if (row.supersededAt) return false;
   if (row.state !== "PUBLISHED" || !row.publishedAt) return false;
   const waitMs = timing === "GRACE_WINDOW" ? graceHours * 60 * 60 * 1000 : 0;
   return row.publishedAt.getTime() + waitMs <= now.getTime();
+}
+
+async function markLowerVersionsSuperseded(
+  tx: PrismaClient,
+  published: {
+    id: string;
+    schoolId: string;
+    studentId: string;
+    subjectId: string;
+    periodId: string;
+    assessmentType: AssessmentType;
+    sequence: number;
+    version: number;
+  },
+  at: Date,
+): Promise<void> {
+  await tx.gradeEntry.updateMany({
+    where: {
+      schoolId: published.schoolId,
+      studentId: published.studentId,
+      subjectId: published.subjectId,
+      periodId: published.periodId,
+      assessmentType: published.assessmentType,
+      sequence: published.sequence,
+      version: { lt: published.version },
+    },
+    data: { supersededAt: at, supersededByGradeId: published.id },
+  });
 }
 
 export async function upsertDraftGrade(
@@ -270,6 +310,7 @@ export async function approveGrade(
   auth: AuthPrincipal,
   schoolId: string,
   gradeId: string,
+  reason?: string,
 ): Promise<GradeRow> {
   if (auth.role !== "school_admin" && auth.role !== "super_admin") {
     throw forbidden("Only a school admin can approve grades.");
@@ -278,6 +319,7 @@ export async function approveGrade(
   if (!existing) throw notFound();
   const period = await loadPeriod(prisma, schoolId, existing.periodId);
   await assertYearAllowsAcademicWrites(prisma, schoolId, period.academicYearId);
+  const deadlineReason = await assertDeadlineWrite(auth, period, reason);
   if (existing.state !== "SUBMITTED") {
     throw conflict("GRADE_NOT_SUBMITTED", "Only a submitted grade can be approved.");
   }
@@ -291,7 +333,7 @@ export async function approveGrade(
     action: "GRADE_APPROVED",
     entityType: "grade_entry",
     entityId: saved.id,
-    metadata: { periodId: period.id, studentId: existing.studentId },
+    metadata: { periodId: period.id, studentId: existing.studentId, reason: deadlineReason || undefined },
   });
   return asGradeRow(saved, period.type !== "SUMMER");
 }
@@ -307,6 +349,7 @@ export async function publishGradeCohort(
     studentIds?: unknown;
     students?: unknown;
     studentId?: unknown;
+    reason?: string;
   },
 ): Promise<{ published: number }> {
   if (auth.role !== "school_admin" && auth.role !== "super_admin") {
@@ -324,6 +367,7 @@ export async function publishGradeCohort(
 
   const period = await loadPeriod(prisma, schoolId, input.periodId);
   await assertYearAllowsAcademicWrites(prisma, schoolId, period.academicYearId);
+  const deadlineReason = await assertDeadlineWrite(auth, period, input.reason);
   const settings = await getSchoolSettings(prisma, schoolId);
   if (settings.gradeCadence === "END_OF_PERIOD") {
     if (dateOnlyString(period.endDate) > dateOnlyString(new Date())) {
@@ -363,29 +407,40 @@ export async function publishGradeCohort(
   }
 
   const now = new Date();
-  const result = await prisma.gradeEntry.updateMany({
-    where: {
+  return prisma.$transaction(async (tx) => {
+    const approved = await tx.gradeEntry.findMany({
+      where: {
+        schoolId,
+        periodId: period.id,
+        studentId: { in: studentIds },
+        state: "APPROVED",
+      },
+    });
+    if (approved.length === 0) {
+      return { published: 0 };
+    }
+    await tx.gradeEntry.updateMany({
+      where: { schoolId, id: { in: approved.map((row) => row.id) } },
+      data: { state: "PUBLISHED", publishedAt: now },
+    });
+    for (const row of approved) {
+      await markLowerVersionsSuperseded(tx as unknown as PrismaClient, row, now);
+    }
+    await writeAudit(tx, {
       schoolId,
-      periodId: period.id,
-      studentId: { in: studentIds },
-      state: "APPROVED",
-    },
-    data: { state: "PUBLISHED", publishedAt: now },
+      actorStaffId: auth.id,
+      action: "GRADE_COHORT_PUBLISHED",
+      entityType: "period",
+      entityId: period.id,
+      metadata: {
+        sectionId: input.sectionId ?? null,
+        gradeLevelId: input.gradeLevelId ?? null,
+        published: approved.length,
+        reason: deadlineReason || undefined,
+      },
+    });
+    return { published: approved.length };
   });
-
-  await writeAudit(prisma, {
-    schoolId,
-    actorStaffId: auth.id,
-    action: "GRADE_COHORT_PUBLISHED",
-    entityType: "period",
-    entityId: period.id,
-    metadata: {
-      sectionId: input.sectionId ?? null,
-      gradeLevelId: input.gradeLevelId ?? null,
-      published: result.count,
-    },
-  });
-  return { published: result.count };
 }
 
 export async function setGradeUnderReview(
@@ -503,7 +558,12 @@ export async function listStudentGrades(
   }
 
   const rows = await prisma.gradeEntry.findMany({
-    where: { schoolId, studentId, ...(periodId ? { periodId } : {}) },
+    where: {
+      schoolId,
+      studentId,
+      ...(periodId ? { periodId } : {}),
+      ...(auth.role === "parent" ? parentVisibleGradeWhere() : {}),
+    },
     include: { period: { select: { type: true } } },
     orderBy: [{ periodId: "asc" }, { subjectId: "asc" }, { assessmentType: "asc" }, { sequence: "asc" }, { version: "desc" }],
   });

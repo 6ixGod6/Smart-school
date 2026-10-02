@@ -572,20 +572,26 @@ model GradeEntry {
   score          Decimal         @db.Decimal(6, 2)
   state          GradeEntryState @default(DRAFT)
   version        Int             @default(1)
-  underReview    Boolean         @default(false) @map("under_review")
-  publishedAt    DateTime?       @map("published_at") @db.Timestamptz
-  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz
+  underReview         Boolean         @default(false) @map("under_review")
+  publishedAt         DateTime?       @map("published_at") @db.Timestamptz
+  supersededAt        DateTime?       @map("superseded_at") @db.Timestamptz
+  supersededByGradeId String?         @map("superseded_by_grade_id") @db.Uuid
+  createdAt           DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime        @updatedAt @map("updated_at") @db.Timestamptz
 
-  student Student @relation(fields: [schoolId, studentId], references: [schoolId, id], onDelete: Restrict)
-  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Restrict)
-  period  Period  @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  student      Student     @relation(fields: [schoolId, studentId], references: [schoolId, id], onDelete: Restrict)
+  subject      Subject     @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  period       Period      @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  supersededBy GradeEntry? @relation("GradeSupersession", fields: [supersededByGradeId], references: [id], onDelete: Restrict)
+  supersedes   GradeEntry[] @relation("GradeSupersession")
 
   @@unique([studentId, subjectId, periodId, assessmentType, sequence, version])
+  @@unique([schoolId, id])
   @@index([schoolId])
   @@index([studentId])
   @@index([periodId])
   @@index([schoolId, periodId, state])
+  @@index([supersededByGradeId])
   @@map("grade_entries")
 }
 

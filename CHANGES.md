@@ -4,6 +4,55 @@ Running changelog per CLAUDE.md §12. Newest entry first.
 
 ---
 
+## 2026-10-02 — Hide superseded grade versions from parents
+
+### What changed and why
+
+Fix only. No admin UI, no new product features.
+
+A published correction left the old `PUBLISHED` row in place and `listStudentGrades` returned every row that passed the grace-window check. After the new version published, a parent saw both scores for the same assessment, with no current/retired distinction.
+
+`GradeEntry` now has `supersededAt` and `supersededByGradeId`. Publishing a cohort, in the same transaction, marks every **lower** version of the same `(studentId, subjectId, periodId, assessmentType, sequence)` tuple as superseded, pointing at the newly published row. Parent queries use `parentVisibleGradeWhere()` (`state = PUBLISHED` and `supersededAt IS NULL`) so a future endpoint cannot forget the rule by sorting and hoping. Staff reads still return the full version history.
+
+A school_admin can take a correction through submit → approve → publish after `gradeEntryDeadline` by supplying a reason at each of those steps (same closed-period rule as attendance / grade entry). Teachers remain 403 after the deadline.
+
+### Dependencies added
+
+None.
+
+### High-risk: grade publishing / parent visibility
+
+- Supersession is written on publish, not inferred at read time. A discredited score cannot stay parent-visible once a later version of that assessment is published.
+- Tenant FK `grade_entries_superseded_by_tenant_fkey` keeps `supersededByGradeId` inside the same school. CHECK `grade_entries_superseded_pair` requires both supersession columns to be set together.
+- Approve and publish after the deadline now require a non-empty admin reason, same as create/submit.
+
+### Tests (actual output)
+
+```
+$ pnpm --filter @smart-school/api typecheck
+tsc --noEmit   (exit 0)
+
+$ pnpm --filter @smart-school/api test
+
+ RUN  v5.0.3 C:/Projects/Smart-school/apps/api
+
+ Test Files  7 passed (7)
+      Tests  90 passed (90)
+   Start at  11:51:54
+   Duration  16.15s
+```
+
+Adversarial coverage added this step:
+
+- Correct a published grade, publish the correction: parent sees exactly one row for that assessment, with the new score.
+- Staff read still returns both versions.
+- The retired row has `supersededByGradeId` pointing at the new row; old score retained.
+- Admin corrects and fully publishes after the period deadline, with a reason; parent sees the new score.
+
+Failures: none in this run.
+
+---
+
 ## 2026-10-02 — Grade entry, deadline lock, publish gate + two promotion fixes (backend)
 
 ### What changed and why

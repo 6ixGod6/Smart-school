@@ -492,6 +492,77 @@ describe("grade entry, deadline lock, and publish gate", () => {
     expect(metadata.reason).toContain("Recount");
   });
 
+  it("hides the superseded score from a parent after the correction is published", async () => {
+    const settings = await request(h.app)
+      .patch(`/v1/schools/${h.ids.schoolA}/settings`)
+      .set(bearer(adminAToken))
+      .send({ gradeCadence: "CONTINUOUS", publishTiming: "IMMEDIATE", publishGraceHours: 0 });
+    expectStatus(settings, 200, "immediate publish for correction");
+
+    const draft = await h.prisma.gradeEntry.findFirstOrThrow({
+      where: {
+        studentId: h.ids.studentAssigned,
+        periodId: openPeriodId,
+        assessmentType: "EXAM",
+        state: "DRAFT",
+      },
+    });
+    const previous = await h.prisma.gradeEntry.findFirstOrThrow({
+      where: {
+        studentId: h.ids.studentAssigned,
+        periodId: openPeriodId,
+        assessmentType: "EXAM",
+        state: "PUBLISHED",
+      },
+    });
+
+    const submitted = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${draft.id}/submit`)
+      .set(bearer(adminAToken))
+      .send({});
+    expectStatus(submitted, 200, "submit correction");
+    const approved = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${draft.id}/approve`)
+      .set(bearer(adminAToken))
+      .send({});
+    expectStatus(approved, 200, "approve correction");
+    const published = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/publish`)
+      .set(bearer(adminAToken))
+      .send({ periodId: openPeriodId, sectionId: h.ids.sectionAssigned });
+    expectStatus(published, 200, "publish correction cohort");
+
+    const parent = await request(h.app)
+      .get(`/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/grades`)
+      .set(bearer(parentAToken));
+    expectStatus(parent, 200, "parent after correction publish");
+    const parentExams = parent.body.grades.filter(
+      (row: { periodId: string; assessmentType: string; sequence: number }) =>
+        row.periodId === openPeriodId && row.assessmentType === "EXAM" && row.sequence === 1,
+    );
+    expect(parentExams).toHaveLength(1);
+    expect(parentExams[0].id).toBe(draft.id);
+    expect(Number(parentExams[0].score)).toBe(96);
+    expect(parentExams[0].supersededAt).toBeNull();
+
+    const staff = await request(h.app)
+      .get(`/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/grades`)
+      .set(bearer(adminAToken));
+    expectStatus(staff, 200, "staff version history");
+    const staffExams = staff.body.grades.filter(
+      (row: { periodId: string; assessmentType: string; sequence: number }) =>
+        row.periodId === openPeriodId && row.assessmentType === "EXAM" && row.sequence === 1,
+    );
+    expect(staffExams).toHaveLength(2);
+    expect(staffExams.some((row: { id: string }) => row.id === previous.id)).toBe(true);
+    expect(staffExams.some((row: { id: string }) => row.id === draft.id)).toBe(true);
+
+    const retired = await h.prisma.gradeEntry.findUniqueOrThrow({ where: { id: previous.id } });
+    expect(retired.supersededByGradeId).toBe(draft.id);
+    expect(retired.supersededAt).toBeTruthy();
+    expect(Number(retired.score.toString())).toBe(91);
+  });
+
   it("rejects a cross-school grade write", async () => {
     const viaPath = await request(h.app)
       .post(`/v1/schools/${h.ids.schoolB}/grades`)
@@ -601,8 +672,85 @@ describe("grade entry, deadline lock, and publish gate", () => {
     const ok = await request(h.app)
       .post(`/v1/schools/${h.ids.schoolA}/grades/publish`)
       .set(bearer(adminAToken))
-      .send({ periodId: closedPeriodId, gradeLevelId: h.ids.gradeLevelA });
+      .send({
+        periodId: closedPeriodId,
+        gradeLevelId: h.ids.gradeLevelA,
+        reason: "Releasing the closed period after the deadline.",
+      });
     expectStatus(ok, 200, "publish after period end");
+  });
+
+  it("lets an admin correct and publish a grade after the deadline, with a reason", async () => {
+    const created = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades`)
+      .set(bearer(adminAToken))
+      .send({
+        studentId: h.ids.studentAssigned,
+        subjectId: h.ids.subjectLit,
+        periodId: closedPeriodId,
+        assessmentType: "HOMEWORK",
+        score: 62,
+        reason: "Late mark book.",
+      });
+    expectStatus(created, 201, "deadline homework draft");
+
+    const submitted = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${created.body.grade.id}/submit`)
+      .set(bearer(adminAToken))
+      .send({ reason: "Submitting after the deadline." });
+    expectStatus(submitted, 200, "deadline submit");
+    const approved = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${created.body.grade.id}/approve`)
+      .set(bearer(adminAToken))
+      .send({ reason: "Approving after the deadline." });
+    expectStatus(approved, 200, "deadline approve");
+    const firstPublish = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/publish`)
+      .set(bearer(adminAToken))
+      .send({
+        periodId: closedPeriodId,
+        sectionId: h.ids.sectionAssigned,
+        reason: "Publishing after the deadline.",
+      });
+    expectStatus(firstPublish, 200, "deadline first publish");
+
+    const corrected = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${created.body.grade.id}/correct`)
+      .set(bearer(adminAToken))
+      .send({ score: 74, reason: "Appeal granted after results went out." });
+    expectStatus(corrected, 200, "deadline correct");
+
+    const resubmit = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${corrected.body.grade.id}/submit`)
+      .set(bearer(adminAToken))
+      .send({ reason: "Submitting the correction after the deadline." });
+    expectStatus(resubmit, 200, "deadline correction submit");
+    const reapprove = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/${corrected.body.grade.id}/approve`)
+      .set(bearer(adminAToken))
+      .send({ reason: "Approving the correction after the deadline." });
+    expectStatus(reapprove, 200, "deadline correction approve");
+    const republish = await request(h.app)
+      .post(`/v1/schools/${h.ids.schoolA}/grades/publish`)
+      .set(bearer(adminAToken))
+      .send({
+        periodId: closedPeriodId,
+        sectionId: h.ids.sectionAssigned,
+        reason: "Publishing the correction after the deadline.",
+      });
+    expectStatus(republish, 200, "deadline correction publish");
+
+    const parent = await request(h.app)
+      .get(`/v1/schools/${h.ids.schoolA}/students/${h.ids.studentAssigned}/grades`)
+      .set(bearer(parentAToken));
+    expectStatus(parent, 200, "parent after deadline correction");
+    const homework = parent.body.grades.filter(
+      (row: { periodId: string; assessmentType: string }) =>
+        row.periodId === closedPeriodId && row.assessmentType === "HOMEWORK",
+    );
+    expect(homework).toHaveLength(1);
+    expect(Number(homework[0].score)).toBe(74);
+    expect(homework[0].id).toBe(corrected.body.grade.id);
   });
 
   it("lets a parent see an INACTIVE child and hides a WITHDRAWN child", async () => {

@@ -145,4 +145,6 @@ export const PRISMA_INVISIBLE_CONSTRAINTS: Array<{
   { name: "periods_summer_no_semester", kind: "check" },
   { name: "academic_years_date_order", kind: "check" },
   { name: "grade_entries_sequence_positive", kind: "check" },
+  { name: "grade_entries_superseded_by_tenant_fkey", kind: "foreign_key" },
+  { name: "grade_entries_superseded_pair", kind: "check" },
 ];

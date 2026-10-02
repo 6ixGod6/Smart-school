@@ -105,6 +105,7 @@ const gradePublishSchema = z
     sectionId: z.string().uuid().optional(),
     gradeLevelId: z.string().uuid().optional(),
     studentIds: z.unknown().optional(),
+    reason: z.string().optional(),
   })
   .passthrough();
 
@@ -381,7 +382,14 @@ export function academicRouter(_deps: AppDeps): Router {
     requireRole("school_admin", "super_admin"),
     asyncHandler(async (req, res) => {
       const { prisma } = req.app.locals.deps as AppDeps;
-      const grade = await approveGrade(prisma, req.auth!, String(req.params.schoolId), String(req.params.gradeId));
+      const body = gradeReasonSchema.parse(req.body ?? {});
+      const grade = await approveGrade(
+        prisma,
+        req.auth!,
+        String(req.params.schoolId),
+        String(req.params.gradeId),
+        body.reason,
+      );
       res.json({ grade });
     }),
   );
